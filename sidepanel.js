@@ -1,0 +1,2560 @@
+// sidepanel.js - Chatter Remote single-panel chat UI (talks to an OVMS server, streaming)
+
+const STORAGE_KEYS = {
+  serverUrl: "serverUrl",
+  selectedModel: "selectedModel",
+  thinking: "thinkingEnabled",
+  language: "language",
+  messages: "messages",
+  pageContent: "pageContent",
+  savedPrompts: "savedPrompts",
+  panelMode: "panelMode",
+  dismissedUpdateVersion: "dismissedUpdateVersion",
+  chatComposerRatio: "chatComposerRatio"
+};
+
+const DEFAULT_MODEL = "";
+const RUNTIME_MESSAGE_TIMEOUT_MS = 30000;
+const MODELS_TIMEOUT_MS = 8000;
+const MAX_OUTPUT_TOKENS = 6000;
+// Loaded pages / clipboard text are capped so prompt + history stay well inside the
+// model's context (the server accepted 34k tokens in testing).
+const CONTEXT_TOKEN_BUDGET = 24000;
+
+const SYSTEM_PROMPTS = {
+  "zh-TW": "你是一位友善且樂於助人的 AI 助理。請使用繁體中文（台灣用語）回答，內容清楚、精準、可執行。",
+  "zh-CN": "你是一位友善且乐于助人的 AI 助理。请使用简体中文回答，内容清晰、准确、可执行。",
+  "en": "You are a friendly and helpful AI assistant. Answer clearly, accurately, and with actionable details."
+};
+
+// Panel-mode button icons (same as voice-clone-remote): the button shows the mode it switches TO
+const PANEL_ICON_ATTRS = 'viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"';
+const PANEL_ICONS = {
+  popup:     `<svg class="hb-icon" ${PANEL_ICON_ATTRS}><rect x="3" y="8" width="13" height="12" rx="2"/><path d="M8 8V6a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-3"/></svg>`,
+  sidepanel: `<svg class="hb-icon" ${PANEL_ICON_ATTRS}><rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="M14 5v14"/></svg>`,
+};
+
+const TRANSLATIONS = {
+  "zh-TW": {
+    "clear": "清除",
+    "current-version": "目前版本 v{version}",
+    "update-available": "發現新版本：Chatter Remote v{version}",
+    "update-download": "下載最新版",
+    "update-dismiss": "忽略此版本",
+    "load-page": "載入網頁",
+    "load-clipboard": "載入剪貼簿",
+    "status-ready": "準備就緒",
+    "resize-chat-layout": "拖曳或使用方向鍵調整對話與輸入區比例",
+    "status-loading-page": "載入網頁中...",
+    "status-loading-clipboard": "載入剪貼簿中...",
+    "status-page-loaded": "網頁已載入",
+    "status-clipboard-loaded": "剪貼簿已載入",
+    "status-loading-models": "載入模型中...",
+    "status-models-loaded": "已載入 {count} 個模型",
+    "status-sending": "發送中...",
+    "status-error": "發生錯誤",
+    "send": "發送",
+    "empty-title": "開始對話",
+    "empty-text": "可以直接開始對話，或是點擊「載入網頁」或「載入剪貼簿」來載入內容後提問。",
+    "input-placeholder": "輸入您的問題...",
+    "system-page-loaded": "已載入網頁內容",
+    "system-clipboard-loaded": "已載入剪貼簿內容",
+    "quick-question-title": "快速提問",
+    "quick-question-help": "說明",
+    "qq-help-intro": "點選下方按鈕，即可用預設提示詞分析已載入的 sighting 或文件：",
+    "template-concise": "簡潔摘要",
+    "template-keydata": "關鍵數據",
+    "template-rootcause": "根因分析",
+    "template-risk": "影響與風險",
+    "template-action": "後續行動",
+    "template-quiz": "出題考我",
+    "qq-desc-concise": "用條列快速摘要重點",
+    "qq-desc-keydata": "抽出關鍵規格、參數與數據",
+    "qq-desc-rootcause": "分析問題的根本原因",
+    "qq-desc-risk": "找出影響範圍與潛在風險",
+    "qq-desc-action": "整理後續行動與負責事項",
+    "qq-desc-quiz": "出題測驗，幫助我真正理解",
+    "saved-prompts": "常用提示詞",
+    "saved-prompts-title": "常用提示詞管理",
+    "manage-prompts": "管理",
+    "add-prompt": "新增提示詞",
+    "empty-prompts": "還沒有常用提示詞，請在下方新增",
+    "empty-saved-prompts": "點擊「管理」來新增常用提示詞",
+    "new-prompt-placeholder": "輸入新的常用提示詞...",
+    "error-no-tab": "找不到當前分頁",
+    "error-load-page": "載入網頁失敗：",
+    "error-load-clipboard": "載入剪貼簿失敗：",
+    "error-clipboard-empty": "剪貼簿是空的",
+    "error-empty-message": "請輸入問題",
+    "error-send": "發送失敗：",
+    "error-load-models": "載入模型失敗：",
+    "error-init": "初始化失敗：",
+    "lang-set": "語言已切換：{lang}",
+    "panel-mode-to-popup": "切換至彈窗",
+    "panel-mode-to-sidepanel": "切換至側欄",
+    "panel-mode-switched-popup": "已切換至彈窗模式，下次點擊圖示將開啟彈窗",
+    "panel-mode-switched-sidepanel": "已切換至側欄模式",
+    "save-session": "💾 儲存對話",
+    "status-session-saved": "對話已儲存",
+    "status-session-empty": "沒有對話可儲存",
+    "confirm-save-before-clear": "對話尚未儲存，是否要先儲存？",
+    "system-youtube-transcript-loaded": "已載入 YouTube 字幕",
+    "status-youtube-transcript-loaded": "YouTube 字幕已載入",
+    "status-youtube-no-transcript": "此影片未提供字幕，已改載入頁面文字",
+    "transcript-show": "▶ 顯示字幕",
+    "transcript-hide": "▼ 隱藏字幕",
+    "dialog-yes": "是",
+    "dialog-no": "否",
+    "dialog-cancel": "取消",
+    "clipboard-tab-label": "剪貼簿內容",
+    "empty-tab-label": "empty",
+    "tab-rename-hint": "雙擊可重新命名",
+    "new-tab": "新增分頁",
+    "tab-scroll-left": "向左捲動分頁",
+    "tab-scroll-right": "向右捲動分頁",
+    "server-settings": "伺服器設定",
+    "server-modal-title": "設定伺服器位址",
+    "server-modal-hint": "請輸入 OVMS 伺服器（ovms-qwen3-27b）的位址，例如 http://<伺服器 IP>:8003。位址只存在這個瀏覽器裡。",
+    "server-placeholder": "http://<伺服器 IP>:8003",
+    "server-confirm": "連線",
+    "server-cancel": "取消",
+    "server-required": "請先設定伺服器位址（點右上角的 ⚙）",
+    "server-updated": "伺服器位址已更新",
+    "status-connected": "已連線 · {model}",
+    "error-no-models": "伺服器沒有回傳可用的模型",
+    "think-label": "思考",
+    "think-tip": "思考模式：回答前先推理，品質較好但較慢",
+    "think-on": "思考模式已開啟",
+    "think-off": "思考模式已關閉",
+    "thinking-live": "思考中…",
+    "thought-title": "思考過程",
+    "thought-title-sec": "思考過程（{sec} 秒）",
+    "stop": "停止",
+    "status-streaming": "回答中...",
+    "status-stopped": "已停止",
+    "stopped-tag": "（已停止）",
+    "no-answer-hint": "模型用完輸出長度仍未給出答案。請關閉思考模式，或縮短問題後重試。",
+    "system-content-truncated": "內容過長，已截取前 {kept} 字（共 {total} 字）"
+  },
+  "zh-CN": {
+    "clear": "清除",
+    "current-version": "当前版本 v{version}",
+    "update-available": "发现新版本：Chatter Remote v{version}",
+    "update-download": "下载最新版",
+    "update-dismiss": "忽略此版本",
+    "load-page": "载入网页",
+    "load-clipboard": "载入剪贴板",
+    "status-ready": "准备就绪",
+    "resize-chat-layout": "拖动或使用方向键调整对话与输入区比例",
+    "status-loading-page": "载入网页中...",
+    "status-loading-clipboard": "载入剪贴板中...",
+    "status-page-loaded": "网页已载入",
+    "status-clipboard-loaded": "剪贴板已载入",
+    "status-loading-models": "载入模型中...",
+    "status-models-loaded": "已载入 {count} 个模型",
+    "status-sending": "发送中...",
+    "status-error": "发生错误",
+    "send": "发送",
+    "empty-title": "开始对话",
+    "empty-text": "可以直接开始对话，或是点击「载入网页」或「载入剪贴板」来载入内容后提问。",
+    "input-placeholder": "输入您的问题...",
+    "system-page-loaded": "已载入网页内容",
+    "system-clipboard-loaded": "已载入剪贴板内容",
+    "quick-question-title": "快速提问",
+    "quick-question-help": "说明",
+    "qq-help-intro": "点选下方按钮，即可用预设提示词分析已载入的 sighting 或文件：",
+    "template-concise": "简洁摘要",
+    "template-keydata": "关键数据",
+    "template-rootcause": "根因分析",
+    "template-risk": "影响与风险",
+    "template-action": "后续行动",
+    "template-quiz": "出题考我",
+    "qq-desc-concise": "用条列快速摘要重点",
+    "qq-desc-keydata": "抽出关键规格、参数与数据",
+    "qq-desc-rootcause": "分析问题的根本原因",
+    "qq-desc-risk": "找出影响范围与潜在风险",
+    "qq-desc-action": "整理后续行动与负责事项",
+    "qq-desc-quiz": "出题测验，帮助我真正理解",
+    "saved-prompts": "常用提示词",
+    "saved-prompts-title": "常用提示词管理",
+    "manage-prompts": "管理",
+    "add-prompt": "新增提示词",
+    "empty-prompts": "还没有常用提示词，请在下方新增",
+    "empty-saved-prompts": "点击「管理」来新增常用提示词",
+    "new-prompt-placeholder": "输入新的常用提示词...",
+    "error-no-tab": "找不到当前标签页",
+    "error-load-page": "载入网页失败：",
+    "error-load-clipboard": "载入剪贴板失败：",
+    "error-clipboard-empty": "剪贴板是空的",
+    "error-empty-message": "请输入问题",
+    "error-send": "发送失败：",
+    "error-load-models": "载入模型失败：",
+    "error-init": "初始化失败：",
+    "lang-set": "语言已切换：{lang}",
+    "panel-mode-to-popup": "切换至弹窗",
+    "panel-mode-to-sidepanel": "切换至侧栏",
+    "panel-mode-switched-popup": "已切换至弹窗模式，下次点击图标将开启弹窗",
+    "panel-mode-switched-sidepanel": "已切换至侧栏模式",
+    "save-session": "💾 储存对话",
+    "status-session-saved": "对话已保存",
+    "status-session-empty": "没有对话可储存",
+    "confirm-save-before-clear": "对话尚未保存，是否要先保存？",
+    "system-youtube-transcript-loaded": "已载入 YouTube 字幕",
+    "status-youtube-transcript-loaded": "YouTube 字幕已载入",
+    "status-youtube-no-transcript": "此影片未提供字幕，已改载入页面文字",
+    "transcript-show": "▶ 显示字幕",
+    "transcript-hide": "▼ 隐藏字幕",
+    "dialog-yes": "是",
+    "dialog-no": "否",
+    "dialog-cancel": "取消",
+    "clipboard-tab-label": "剪贴板内容",
+    "empty-tab-label": "empty",
+    "tab-rename-hint": "双击可重新命名",
+    "new-tab": "新建标签页",
+    "tab-scroll-left": "向左滚动标签页",
+    "tab-scroll-right": "向右滚动标签页",
+    "copy": "复制",
+    "copied": "已复制",
+    "server-settings": "服务器设置",
+    "server-modal-title": "设置服务器地址",
+    "server-modal-hint": "请输入 OVMS 服务器（ovms-qwen3-27b）的地址，例如 http://<服务器 IP>:8003。地址只保存在这个浏览器里。",
+    "server-placeholder": "http://<服务器 IP>:8003",
+    "server-confirm": "连接",
+    "server-cancel": "取消",
+    "server-required": "请先设置服务器地址（点右上角的 ⚙）",
+    "server-updated": "服务器地址已更新",
+    "status-connected": "已连接 · {model}",
+    "error-no-models": "服务器没有返回可用的模型",
+    "think-label": "思考",
+    "think-tip": "思考模式：回答前先推理，质量更好但更慢",
+    "think-on": "思考模式已开启",
+    "think-off": "思考模式已关闭",
+    "thinking-live": "思考中…",
+    "thought-title": "思考过程",
+    "thought-title-sec": "思考过程（{sec} 秒）",
+    "stop": "停止",
+    "status-streaming": "回答中...",
+    "status-stopped": "已停止",
+    "stopped-tag": "（已停止）",
+    "no-answer-hint": "模型用完输出长度仍未给出答案。请关闭思考模式，或缩短问题后重试。",
+    "system-content-truncated": "内容过长，已截取前 {kept} 字（共 {total} 字）"
+  },
+  "en": {
+    "clear": "Clear",
+    "current-version": "Current version v{version}",
+    "update-available": "New version available: Chatter Remote v{version}",
+    "update-download": "Download latest",
+    "update-dismiss": "Dismiss this version",
+    "load-page": "Load Page",
+    "load-clipboard": "Load Clipboard",
+    "status-ready": "Ready",
+    "resize-chat-layout": "Drag or use the arrow keys to resize the conversation and composer",
+    "status-loading-page": "Loading page...",
+    "status-loading-clipboard": "Loading clipboard...",
+    "status-page-loaded": "Page loaded",
+    "status-clipboard-loaded": "Clipboard loaded",
+    "status-loading-models": "Loading models...",
+    "status-models-loaded": "Loaded {count} models",
+    "status-sending": "Sending...",
+    "status-error": "Error occurred",
+    "send": "Send",
+    "empty-title": "Start Conversation",
+    "empty-text": "You can start chatting directly, or click \"Load Page\" or \"Load Clipboard\" to load content first.",
+    "input-placeholder": "Type your question...",
+    "system-page-loaded": "Page content loaded",
+    "system-clipboard-loaded": "Clipboard content loaded",
+    "quick-question-title": "Quick Questions",
+    "quick-question-help": "Help",
+    "qq-help-intro": "Click a button to analyze the loaded sighting or document with a preset prompt:",
+    "template-concise": "Concise Summary",
+    "template-keydata": "Key Data",
+    "template-rootcause": "Root Cause",
+    "template-risk": "Impact & Risk",
+    "template-action": "Action Items",
+    "template-quiz": "Quiz Me",
+    "qq-desc-concise": "Quick bullet-point summary of key points",
+    "qq-desc-keydata": "Extract key specs, parameters and data",
+    "qq-desc-rootcause": "Analyze the underlying root cause",
+    "qq-desc-risk": "Identify impact scope and potential risks",
+    "qq-desc-action": "Summarize follow-up actions and owners",
+    "qq-desc-quiz": "Quiz me to reinforce understanding",
+    "saved-prompts": "Saved Prompts",
+    "saved-prompts-title": "Saved Prompts Manager",
+    "manage-prompts": "Manage",
+    "add-prompt": "Add Prompt",
+    "empty-prompts": "No saved prompts yet, add one below",
+    "empty-saved-prompts": "Click \"Manage\" to add saved prompts",
+    "new-prompt-placeholder": "Enter new prompt...",
+    "error-no-tab": "Cannot find current tab",
+    "error-load-page": "Failed to load page: ",
+    "error-load-clipboard": "Failed to load clipboard: ",
+    "error-clipboard-empty": "Clipboard is empty",
+    "error-empty-message": "Please enter a message",
+    "error-send": "Failed to send: ",
+    "error-load-models": "Failed to load models: ",
+    "error-init": "Initialization failed: ",
+    "lang-set": "Language set: {lang}",
+    "panel-mode-to-popup": "Switch to Popup",
+    "panel-mode-to-sidepanel": "Switch to Side Panel",
+    "panel-mode-switched-popup": "Switched to popup mode. Next click on the icon will open a popup.",
+    "panel-mode-switched-sidepanel": "Switched to side panel mode.",
+    "save-session": "💾 Save Session",
+    "status-session-saved": "Session saved",
+    "status-session-empty": "No conversation to save",
+    "confirm-save-before-clear": "Session not saved. Save before clearing?",
+    "system-youtube-transcript-loaded": "YouTube transcript loaded",
+    "status-youtube-transcript-loaded": "YouTube transcript loaded",
+    "status-youtube-no-transcript": "No transcript available; loaded page text instead",
+    "transcript-show": "▶ Show Transcript",
+    "transcript-hide": "▼ Hide Transcript",
+    "dialog-yes": "Yes",
+    "dialog-no": "No",
+    "dialog-cancel": "Cancel",
+    "clipboard-tab-label": "Clipboard",
+    "empty-tab-label": "empty",
+    "tab-rename-hint": "Double-click to rename",
+    "new-tab": "New tab",
+    "tab-scroll-left": "Scroll tabs left",
+    "tab-scroll-right": "Scroll tabs right",
+    "copy": "Copy",
+    "copied": "Copied",
+    "server-settings": "Server settings",
+    "server-modal-title": "Set server address",
+    "server-modal-hint": "Enter the address of the OVMS server (ovms-qwen3-27b), e.g. http://<server-ip>:8003. It is stored only in this browser.",
+    "server-placeholder": "http://<server-ip>:8003",
+    "server-confirm": "Connect",
+    "server-cancel": "Cancel",
+    "server-required": "Set the server address first (⚙ at the top right)",
+    "server-updated": "Server address updated",
+    "status-connected": "Connected · {model}",
+    "error-no-models": "The server returned no models",
+    "think-label": "Think",
+    "think-tip": "Thinking mode: reason before answering — better quality, slower",
+    "think-on": "Thinking mode on",
+    "think-off": "Thinking mode off",
+    "thinking-live": "Thinking…",
+    "thought-title": "Thought process",
+    "thought-title-sec": "Thought for {sec}s",
+    "stop": "Stop",
+    "status-streaming": "Answering...",
+    "status-stopped": "Stopped",
+    "stopped-tag": "(stopped)",
+    "no-answer-hint": "The model ran out of output length before giving an answer. Turn thinking off or shorten the question and try again.",
+    "system-content-truncated": "Content is long; kept the first {kept} of {total} characters"
+  }
+};
+
+const UI = {
+  headerTitle: document.getElementById("headerTitle"),
+  extensionVersion: document.getElementById("extensionVersion"),
+  updateBanner: document.getElementById("updateBanner"),
+  updateMessage: document.getElementById("updateMessage"),
+  updateLink: document.getElementById("updateLink"),
+  updateDismissBtn: document.getElementById("updateDismissBtn"),
+  panelModeBtn: document.getElementById("panelModeBtn"),
+  clearBtn: document.getElementById("clearBtn"),
+  saveSessionBtn: document.getElementById("saveSessionBtn"),
+  loadPageBtn: document.getElementById("loadPageBtn"),
+  loadClipboardBtn: document.getElementById("loadClipboardBtn"),
+  languageSelect: document.getElementById("languageSelect"),
+  statusIndicator: document.getElementById("statusIndicator"),
+  statusText: document.getElementById("statusText"),
+  thinkToggle: document.getElementById("thinkToggle"),
+  serverBtn: document.getElementById("serverBtn"),
+  messagesContainer: document.getElementById("messagesContainer"),
+  chatContainer: document.querySelector(".chat-container"),
+  inputContainer: document.getElementById("inputContainer"),
+  chatLayoutResizer: document.getElementById("chatLayoutResizer"),
+  messageInput: document.getElementById("messageInput"),
+  sendBtn: document.getElementById("sendBtn"),
+  sendLabel: document.querySelector("#sendBtn .send-label"),
+  savedPromptsModal: document.getElementById("savedPromptsModal"),
+  savedPromptsList: document.getElementById("savedPromptsList"),
+  closeSavedPromptsModal: document.getElementById("closeSavedPromptsModal"),
+  newPromptInput: document.getElementById("newPromptInput"),
+  addPromptBtn: document.getElementById("addPromptBtn"),
+  serverModal: document.getElementById("serverModal"),
+  serverInput: document.getElementById("serverInput"),
+  serverConfirmBtn: document.getElementById("serverConfirmBtn"),
+  serverCancelBtn: document.getElementById("serverCancelBtn"),
+  closeServerModal: document.getElementById("closeServerModal"),
+  confirmSaveModal: document.getElementById("confirmSaveModal"),
+  confirmSaveYesBtn: document.getElementById("confirmSaveYesBtn"),
+  confirmSaveNoBtn: document.getElementById("confirmSaveNoBtn"),
+  confirmSaveCancelBtn: document.getElementById("confirmSaveCancelBtn")
+};
+
+// When running as a popup window, background embeds the source browser windowId
+// in the URL (?srcWindowId=N) so we can call sidePanel.open() synchronously
+// inside the user-gesture handler (before any await breaks the gesture context).
+const POPUP_SRC_WINDOW_ID = (() => {
+  const id = parseInt(new URLSearchParams(window.location.search).get("srcWindowId"), 10);
+  return isNaN(id) ? null : id;
+})();
+
+let tabs = [
+  { id: 0, messages: [], pageContent: null, selectedModel: DEFAULT_MODEL, sessionSaved: false }
+];
+
+let state = {
+  currentLanguage: "zh-TW",
+  serverUrl: "",
+  thinking: false,
+  selectedModel: DEFAULT_MODEL,
+  models: [],
+  messages: [],
+  pageContent: null,
+  savedPrompts: [],
+  panelMode: "sidepanel",
+  sessionSaved: false,
+  activeTabId: 0,
+  nextTabId: 1,
+  chatComposerRatio: null,
+  abortController: null,  // set while an answer is streaming
+};
+
+let availableUpdate = null;
+
+function t(key, params = {}) {
+  let text = TRANSLATIONS[state.currentLanguage]?.[key] || key;
+  Object.keys(params).forEach((paramKey) => {
+    text = text.replace(`{${paramKey}}`, params[paramKey]);
+  });
+  return text;
+}
+
+function escapeHtml(text) {
+  return String(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function renderMarkdown(md) {
+  let html = md || "";
+
+  // 1. Fenced code blocks — escape HTML inside so code shows as-is
+  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_m, _lang, code) => {
+    const esc = code.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    return `<pre><code>${esc}</code></pre>`;
+  });
+
+  // 2. Inline code — escape HTML inside
+  html = html.replace(/`([^`]+)`/g, (_m, code) => {
+    const esc = code.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    return `<code>${esc}</code>`;
+  });
+
+  // 3. Bold / italic
+  html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  html = html.replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
+
+  // 4. Headings (# treated same as ##)
+  html = html.replace(/^#{1,2} (.+)$/gm, "<h2>$1</h2>");
+  html = html.replace(/^### (.+)$/gm, "<h3>$1</h3>");
+
+  // 5. Ordered list items (mark with attribute to distinguish from ul)
+  html = html.replace(/^\d+\. (.+)$/gm, "<li data-ol>$1</li>");
+
+  // 6. Unordered list items
+  html = html.replace(/^[-*] (.+)$/gm, "<li>$1</li>");
+
+  // Group consecutive ordered-list items
+  html = html.replace(/(<li data-ol>[\s\S]*?<\/li>\n*)+/g,
+    (m) => `<ol>${m.replace(/ data-ol/g, "")}</ol>`);
+
+  // Group consecutive unordered-list items
+  html = html.replace(/(<li>[\s\S]*?<\/li>\n*)+/g, (m) => `<ul>${m}</ul>`);
+
+  // 7. Tables
+  html = html.replace(/((?:^\|[^\n]*(?:\n|$))+)/gm, (block) => {
+    const lines = block.trim().split("\n").filter((l) => l.trim().startsWith("|"));
+    if (lines.length < 3) return block;
+    const isSep = (l) => /^\|[\s\-:|]+\|/.test(l.trim());
+    if (!isSep(lines[1])) return block;
+    const cells = (l) => l.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
+    const headers = cells(lines[0]);
+    const rows = lines.slice(2).filter((l) => l.trim()).map(cells);
+    let tbl = '<div class="table-wrapper"><table><thead><tr>';
+    headers.forEach((h) => { tbl += `<th>${h}</th>`; });
+    tbl += "</tr></thead><tbody>";
+    rows.forEach((r) => {
+      tbl += "<tr>";
+      r.forEach((c) => { tbl += `<td>${c}</td>`; });
+      tbl += "</tr>";
+    });
+    tbl += "</tbody></table></div>";
+    return tbl;
+  });
+
+  // 8. Collapse all newlines → single <br>, no paragraph structure
+  html = html.replace(/\n+/g, "\n");
+  html = html.replace(/\n/g, "<br>");
+  // Remove <br> directly adjacent to block elements (they space themselves via CSS margin)
+  html = html.replace(/(<br>)+(<\/?(h[23]|li|[uo]l|pre|div)[^>]*>)/gi, "$2");
+  html = html.replace(/(<\/?(h[23]|li|[uo]l|pre|div)[^>]*>)(<br>)+/gi, "$1");
+
+  return html;
+}
+
+function updateUILanguage() {
+  document.querySelectorAll("[data-i18n]").forEach((element) => {
+    const key = element.getAttribute("data-i18n");
+    if (!key) return;
+    const text = t(key);
+
+    if (key === "empty-text") {
+      element.innerHTML = text.replace(/\n/g, "<br>");
+      return;
+    }
+
+    if (element.tagName === "PRE") {
+      element.textContent = text;
+      return;
+    }
+
+    element.textContent = text;
+  });
+
+  document.querySelectorAll("[data-i18n-placeholder]").forEach((element) => {
+    const key = element.getAttribute("data-i18n-placeholder");
+    if (!key) return;
+    element.placeholder = t(key);
+  });
+
+  document.querySelectorAll("[data-i18n-title]").forEach((element) => {
+    const key = element.getAttribute("data-i18n-title");
+    if (!key) return;
+    element.title = t(key);
+  });
+
+  document.querySelectorAll("[data-i18n-aria-label]").forEach((element) => {
+    const key = element.getAttribute("data-i18n-aria-label");
+    if (!key) return;
+    element.setAttribute("aria-label", t(key));
+  });
+
+  UI.languageSelect.value = state.currentLanguage;
+  updatePanelModeBtn();
+  renderUpdateBanner();
+
+  renderModelOptions();
+  renderThinkToggle();
+  renderSendButton();
+
+  // Re-render the tab bar so dynamically built labels/tooltips (e.g. the
+  // "double-click to rename" hint) pick up the newly selected language.
+  renderTabBar();
+}
+
+function setStatus(type, text) {
+  UI.statusIndicator.className = `status-indicator ${type}`;
+  UI.statusText.textContent = text;
+}
+
+async function sendRuntimeMessage(payload, timeoutMs = RUNTIME_MESSAGE_TIMEOUT_MS) {
+  return new Promise((resolve) => {
+    const timeoutId = setTimeout(() => {
+      resolve({ ok: false, error: `Request timeout after ${timeoutMs}ms` });
+    }, timeoutMs);
+
+    chrome.runtime.sendMessage(payload, (response) => {
+      clearTimeout(timeoutId);
+
+      if (chrome.runtime.lastError) {
+        resolve({ ok: false, error: chrome.runtime.lastError.message || "Runtime message failed" });
+        return;
+      }
+
+      resolve(response || { ok: false, error: "No response from background" });
+    });
+  });
+}
+
+function renderInstalledVersion() {
+  const version = chrome.runtime.getManifest().version;
+  UI.extensionVersion.textContent = `v${version}`;
+  UI.extensionVersion.title = t("current-version", { version });
+}
+
+function renderUpdateBanner() {
+  renderInstalledVersion();
+  if (!availableUpdate?.latestVersion) {
+    UI.updateBanner.hidden = true;
+    return;
+  }
+
+  UI.updateMessage.textContent = t("update-available", { version: availableUpdate.latestVersion });
+  UI.updateLink.href = availableUpdate.releaseUrl;
+  UI.updateBanner.hidden = false;
+}
+
+async function checkForExtensionUpdate(force = false) {
+  renderInstalledVersion();
+  const result = await sendRuntimeMessage({ type: "CHECK_EXTENSION_UPDATE", force });
+  if (!result?.ok || !result.updateAvailable || !result.latestVersion) return;
+
+  const stored = await chrome.storage.local.get(STORAGE_KEYS.dismissedUpdateVersion);
+  if (stored[STORAGE_KEYS.dismissedUpdateVersion] === result.latestVersion) return;
+
+  availableUpdate = {
+    latestVersion: result.latestVersion,
+    releaseUrl: "https://github.com/paulchi-intel/chatter-remote/releases/latest"
+  };
+  renderUpdateBanner();
+}
+
+async function dismissExtensionUpdate() {
+  if (!availableUpdate?.latestVersion) return;
+  await chrome.storage.local.set({
+    [STORAGE_KEYS.dismissedUpdateVersion]: availableUpdate.latestVersion
+  });
+  availableUpdate = null;
+  renderUpdateBanner();
+}
+
+const MIN_COMPOSER_RATIO = 0.15;
+const MAX_COMPOSER_RATIO = 0.65;
+const COMPOSER_RATIO_STEP = 0.05;
+
+function normalizeComposerRatio(value) {
+  const ratio = Number(value);
+  if (!Number.isFinite(ratio)) return null;
+  return Math.min(MAX_COMPOSER_RATIO, Math.max(MIN_COMPOSER_RATIO, ratio));
+}
+
+function getLayoutSplitHeight(config) {
+  const upperRect = config.upper.getBoundingClientRect();
+  const lowerRect = config.lower.getBoundingClientRect();
+  return Math.max(0, lowerRect.bottom - upperRect.top);
+}
+
+function getCurrentComposerRatio(config) {
+  const totalHeight = getLayoutSplitHeight(config);
+  if (!totalHeight) return normalizeComposerRatio(state[config.stateKey]) || config.defaultRatio;
+  return normalizeComposerRatio(config.lower.getBoundingClientRect().height / totalHeight) || config.defaultRatio;
+}
+
+function applyComposerRatio(config, value, persist = false) {
+  const ratio = normalizeComposerRatio(value);
+  if (ratio == null) return;
+  const totalHeight = getLayoutSplitHeight(config);
+  if (totalHeight > 0) config.lower.style.flexBasis = `${Math.round(totalHeight * ratio)}px`;
+  state[config.stateKey] = ratio;
+  const percent = Math.round(ratio * 100);
+  config.handle.setAttribute("aria-valuenow", String(percent));
+  config.handle.setAttribute("aria-valuetext", `${percent}%`);
+  if (persist) {
+    chrome.storage.local.set({ [config.storageKey]: ratio }).catch(() => {});
+  }
+}
+
+function setupLayoutResizer(config) {
+  if (!config.handle || !config.upper || !config.lower) return;
+  let dragging = false;
+  let pendingClientY = null;
+  let frameId = 0;
+
+  const ratioFromClientY = (clientY) => {
+    const upperRect = config.upper.getBoundingClientRect();
+    const lowerRect = config.lower.getBoundingClientRect();
+    const totalHeight = Math.max(1, lowerRect.bottom - upperRect.top);
+    return normalizeComposerRatio((lowerRect.bottom - clientY) / totalHeight);
+  };
+
+  const flushPointerUpdate = () => {
+    frameId = 0;
+    if (pendingClientY == null) return;
+    const ratio = ratioFromClientY(pendingClientY);
+    pendingClientY = null;
+    applyComposerRatio(config, ratio);
+  };
+
+  const queuePointerUpdate = (clientY) => {
+    pendingClientY = clientY;
+    if (!frameId) frameId = requestAnimationFrame(flushPointerUpdate);
+  };
+
+  const finishDragging = (event) => {
+    if (!dragging) return;
+    if (event?.clientY != null) pendingClientY = event.clientY;
+    if (frameId) cancelAnimationFrame(frameId);
+    flushPointerUpdate();
+    dragging = false;
+    config.handle.classList.remove("active");
+    document.body.classList.remove("resizing-layout");
+    applyComposerRatio(config, state[config.stateKey] || getCurrentComposerRatio(config), true);
+    if (event?.pointerId != null && config.handle.hasPointerCapture?.(event.pointerId)) {
+      config.handle.releasePointerCapture(event.pointerId);
+    }
+  };
+
+  config.handle.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0 || !event.isPrimary || dragging) return;
+    event.preventDefault();
+    dragging = true;
+    config.handle.classList.add("active");
+    document.body.classList.add("resizing-layout");
+    config.handle.setPointerCapture(event.pointerId);
+    queuePointerUpdate(event.clientY);
+  });
+  config.handle.addEventListener("pointermove", (event) => {
+    if (dragging) queuePointerUpdate(event.clientY);
+  });
+  config.handle.addEventListener("pointerup", finishDragging);
+  config.handle.addEventListener("pointercancel", finishDragging);
+  config.handle.addEventListener("lostpointercapture", finishDragging);
+  window.addEventListener("blur", finishDragging);
+
+  config.handle.addEventListener("keydown", (event) => {
+    if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const current = normalizeComposerRatio(state[config.stateKey]) || getCurrentComposerRatio(config);
+    const step = event.shiftKey ? COMPOSER_RATIO_STEP * 2 : COMPOSER_RATIO_STEP;
+    const next = event.key === "Home"
+      ? MIN_COMPOSER_RATIO
+      : event.key === "End"
+        ? MAX_COMPOSER_RATIO
+        : current + (event.key === "ArrowUp" ? step : -step);
+    applyComposerRatio(config, next, true);
+  });
+
+  const savedRatio = normalizeComposerRatio(state[config.stateKey]);
+  requestAnimationFrame(() => {
+    applyComposerRatio(config, savedRatio || getCurrentComposerRatio(config));
+  });
+
+  if (typeof ResizeObserver === "function") {
+    const observer = new ResizeObserver(() => {
+      const ratio = normalizeComposerRatio(state[config.stateKey]);
+      if (ratio != null && !dragging) applyComposerRatio(config, ratio);
+    });
+    observer.observe(config.container);
+  }
+}
+
+function setupLayoutResizers() {
+  setupLayoutResizer({
+    container: UI.chatContainer,
+    upper: UI.messagesContainer,
+    lower: UI.inputContainer,
+    handle: UI.chatLayoutResizer,
+    stateKey: "chatComposerRatio",
+    storageKey: STORAGE_KEYS.chatComposerRatio,
+    defaultRatio: 0.24
+  });
+}
+
+// ── Server connection ───────────────────────────────────────────────────────
+function normalizeServerUrl(value) {
+  let v = String(value || "").trim().replace(/\/+$/, "");
+  v = v.replace(/\/v3(\/.*)?$/i, "");  // accept a pasted API URL such as http://host:8003/v3
+  if (v && !/^https?:\/\//i.test(v)) v = "http://" + v;
+  return v;
+}
+
+function apiBase() {
+  return `${state.serverUrl}/v3`;
+}
+
+function promptForServer(force = false) {
+  return new Promise((resolve) => {
+    UI.serverInput.value = state.serverUrl || "";
+    UI.serverModal.classList.add("show");
+    UI.serverInput.focus();
+    UI.serverInput.select();
+
+    function cleanup() {
+      UI.serverModal.classList.remove("show");
+      UI.serverConfirmBtn.removeEventListener("click", onConfirm);
+      UI.serverCancelBtn.removeEventListener("click", onCancel);
+      UI.closeServerModal.removeEventListener("click", onCancel);
+      UI.serverModal.removeEventListener("click", onBackdrop);
+      UI.serverInput.removeEventListener("keydown", onKeydown);
+    }
+
+    async function onConfirm() {
+      const url = normalizeServerUrl(UI.serverInput.value);
+      if (!url) {
+        UI.serverInput.focus();
+        return;
+      }
+      cleanup();
+      state.serverUrl = url;
+      await saveState();
+      setStatus("ready", t("server-updated"));
+      resolve(true);
+    }
+
+    function onCancel() {
+      cleanup();
+      if (force && !state.serverUrl) {
+        setStatus("error", t("server-required"));
+      }
+      resolve(false);
+    }
+
+    function onBackdrop(e) {
+      if (e.target === UI.serverModal) onCancel();
+    }
+
+    function onKeydown(e) {
+      if (e.key === "Enter") onConfirm();
+      else if (e.key === "Escape") onCancel();
+    }
+
+    UI.serverConfirmBtn.addEventListener("click", onConfirm);
+    UI.serverCancelBtn.addEventListener("click", onCancel);
+    UI.closeServerModal.addEventListener("click", onCancel);
+    UI.serverModal.addEventListener("click", onBackdrop);
+    UI.serverInput.addEventListener("keydown", onKeydown);
+  });
+}
+
+function showConfirmSaveDialog() {
+  return new Promise((resolve) => {
+    UI.confirmSaveModal.classList.add("show");
+
+    function cleanup() {
+      UI.confirmSaveModal.classList.remove("show");
+      UI.confirmSaveYesBtn.removeEventListener("click", onYes);
+      UI.confirmSaveNoBtn.removeEventListener("click", onNo);
+      UI.confirmSaveCancelBtn.removeEventListener("click", onCancel);
+      UI.confirmSaveModal.removeEventListener("click", onBackdrop);
+      document.removeEventListener("keydown", onKeydown);
+    }
+
+    function onYes() { cleanup(); resolve("yes"); }
+    function onNo() { cleanup(); resolve("no"); }
+    function onCancel() { cleanup(); resolve("cancel"); }
+    function onBackdrop(e) { if (e.target === UI.confirmSaveModal) onCancel(); }
+    function onKeydown(e) { if (e.key === "Escape") onCancel(); }
+
+    UI.confirmSaveYesBtn.addEventListener("click", onYes);
+    UI.confirmSaveNoBtn.addEventListener("click", onNo);
+    UI.confirmSaveCancelBtn.addEventListener("click", onCancel);
+    UI.confirmSaveModal.addEventListener("click", onBackdrop);
+    document.addEventListener("keydown", onKeydown);
+  });
+}
+
+function _appendTranscriptToggle(node, transcript) {
+  const toggle = document.createElement("div");
+  toggle.className = "transcript-toggle";
+  toggle.textContent = t("transcript-show");
+  const panel = document.createElement("div");
+  panel.className = "transcript-panel";
+  panel.textContent = transcript;
+  toggle.addEventListener("click", () => {
+    const visible = panel.classList.toggle("visible");
+    toggle.textContent = t(visible ? "transcript-hide" : "transcript-show");
+  });
+  node.appendChild(toggle);
+  node.appendChild(panel);
+}
+
+async function navigateToUrl(url) {
+  try {
+    const found = await chrome.tabs.query({ url });
+    if (found.length > 0) {
+      await chrome.tabs.update(found[0].id, { active: true });
+      await chrome.windows.update(found[0].windowId, { focused: true });
+    } else {
+      await chrome.tabs.create({ url });
+    }
+  } catch (e) {
+    console.error("[KC] navigateToUrl error:", e);
+  }
+}
+
+function _setPageUrl(element, url) {
+  element.textContent = "";
+  if (url && (url.startsWith("http://") || url.startsWith("https://"))) {
+    const a = document.createElement("a");
+    a.href = "#";
+    a.textContent = url;
+    a.addEventListener("click", (e) => { e.preventDefault(); navigateToUrl(url); });
+    element.appendChild(a);
+  } else {
+    element.textContent = url || "";
+  }
+}
+
+function showPageInfo(title, url, transcript = null) {
+  let node = UI.messagesContainer.querySelector(".page-info");
+  if (node) {
+    node.querySelector(".page-title").textContent = title || "";
+    _setPageUrl(node.querySelector(".page-url"), url);
+    const oldToggle = node.querySelector(".transcript-toggle");
+    const oldPanel  = node.querySelector(".transcript-panel");
+    if (oldToggle) oldToggle.remove();
+    if (oldPanel)  oldPanel.remove();
+    if (transcript) _appendTranscriptToggle(node, transcript);
+    return;
+  }
+  node = document.createElement("div");
+  node.className = "page-info";
+  node.innerHTML = "<div class=\"page-title\"></div><div class=\"page-url\"></div>";
+  node.querySelector(".page-title").textContent = title || "";
+  _setPageUrl(node.querySelector(".page-url"), url);
+  if (transcript) _appendTranscriptToggle(node, transcript);
+  UI.messagesContainer.prepend(node);
+}
+
+function hidePageInfo() {
+  const node = UI.messagesContainer.querySelector(".page-info");
+  if (node) node.remove();
+}
+
+function renderEmptyState() {
+  UI.messagesContainer.innerHTML = `
+    <div class="empty-state">
+      <div class="empty-state-icon">
+        <svg class="empty-mark" viewBox="0 0 120 104" fill="none" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <defs>
+            <linearGradient id="emg" x1="12" y1="10" x2="108" y2="92" gradientUnits="userSpaceOnUse">
+              <stop stop-color="#3b82f6"/><stop offset="1" stop-color="#8b5cf6"/>
+            </linearGradient>
+            <radialGradient id="eglow" cx="50%" cy="46%" r="55%">
+              <stop stop-color="#a78bfa" stop-opacity=".45"/><stop offset="1" stop-color="#a78bfa" stop-opacity="0"/>
+            </radialGradient>
+          </defs>
+          <ellipse class="empty-glow" cx="60" cy="54" rx="52" ry="42" fill="url(#eglow)"/>
+          <g class="empty-float">
+            <path class="draw" d="M22 20h76a10 10 0 0 1 10 10v34a10 10 0 0 1-10 10H52l-19 16v-16H22a10 10 0 0 1-10-10V30a10 10 0 0 1 10-10Z" stroke="url(#emg)" stroke-width="3.5"/>
+            <circle class="empty-dot d1" cx="44" cy="47" r="4.4" fill="#3b82f6"/>
+            <circle class="empty-dot d2" cx="60" cy="47" r="4.4" fill="#7c3aed"/>
+            <circle class="empty-dot d3" cx="76" cy="47" r="4.4" fill="#8b5cf6"/>
+          </g>
+          <circle class="empty-spark s1" cx="16" cy="14" r="2.4" fill="#c4b5fd"/>
+          <circle class="empty-spark s2" cx="106" cy="16" r="2" fill="#a78bfa"/>
+        </svg>
+      </div>
+      <div class="empty-state-title" data-i18n="empty-title">${t("empty-title")}</div>
+      <div class="empty-state-text" data-i18n="empty-text">${t("empty-text").replace(/\n/g, "<br>")}</div>
+    </div>
+  `;
+}
+
+// Remove model artefacts: stray <think> tags and leading blank lines
+function cleanAnswer(text) {
+  return String(text || "").replace(/<\/?think>/g, "").replace(/^\s+/, "");
+}
+
+function reasoningSummaryText(extra) {
+  return extra?.thinkSec ? t("thought-title-sec", { sec: String(extra.thinkSec) }) : t("thought-title");
+}
+
+// Collapsible "thought process" block shown above an answer
+function buildReasoningNode(reasoning, extra = {}) {
+  const details = document.createElement("details");
+  details.className = "reasoning";
+  const summary = document.createElement("summary");
+  summary.textContent = reasoningSummaryText(extra);
+  const body = document.createElement("div");
+  body.className = "reasoning-body";
+  body.textContent = reasoning;
+  details.append(summary, body);
+  return details;
+}
+
+function addMessage(role, content, animate = false, extra = {}) {
+  const emptyState = UI.messagesContainer.querySelector(".empty-state");
+  if (emptyState) {
+    emptyState.remove();
+  }
+
+  const node = document.createElement("div");
+  node.className = `message ${role}` + (animate ? " enter" : "");
+
+  if (role === "assistant") {
+    if (extra.reasoning) node.appendChild(buildReasoningNode(extra.reasoning, extra));
+    const answer = document.createElement("div");
+    answer.className = "answer";
+    answer.innerHTML = renderMarkdown(cleanAnswer(content));
+    node.appendChild(answer);
+    if (extra.stopped) {
+      const tag = document.createElement("span");
+      tag.className = "stopped-tag";
+      tag.textContent = t("stopped-tag");
+      node.appendChild(tag);
+    }
+    addCopyButton(node, cleanAnswer(content));
+  } else {
+    node.textContent = content || "";
+  }
+
+  UI.messagesContainer.appendChild(node);
+  UI.messagesContainer.scrollTop = UI.messagesContainer.scrollHeight;
+  return node;
+}
+
+// Copy-to-clipboard button with animated checkmark draw-on confirmation.
+function addCopyButton(node, text) {
+  const btn = document.createElement("button");
+  btn.className = "copy-btn";
+  btn.type = "button";
+  btn.title = t("copy");
+  btn.setAttribute("aria-label", t("copy"));
+  btn.innerHTML =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<g class="ic-copy">' +
+    '<rect x="9" y="9" width="11" height="11" rx="2.4"/>' +
+    '<path d="M5 15V6a2 2 0 0 1 2-2h9"/>' +
+    '</g>' +
+    '<path class="ic-check" d="M5 12.5 10 17.5 19.5 7"/>' +
+    '</svg>';
+  btn.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    try {
+      // Use the same mechanism as manual selection copy: mount a hidden clone,
+      // select its contents, and let the browser's native copy pipeline handle
+      // all clipboard formats (text/html with Fragment markers, text/plain,
+      // CF_HTML for Word/Outlook, etc.).  This is identical to what the browser
+      // does when the user selects text and presses Ctrl+C, so tables, colours
+      // and all other formatting are preserved automatically.
+      const clone = node.cloneNode(true);
+      clone.querySelector(".copy-btn")?.remove();
+      clone.querySelector(".reasoning")?.remove();
+      clone.querySelector(".stopped-tag")?.remove();
+
+      const temp = document.createElement("div");
+      temp.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0;pointer-events:none;white-space:pre-wrap;";
+      temp.appendChild(clone);
+      document.body.appendChild(temp);
+
+      const range = document.createRange();
+      range.selectNodeContents(temp);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+
+      let ok = false;
+      try {
+        ok = document.execCommand("copy");
+      } finally {
+        sel.removeAllRanges();
+        document.body.removeChild(temp);
+      }
+
+      // execCommand fallback: if somehow unavailable, use writeText
+      if (!ok) {
+        await navigator.clipboard.writeText(node.textContent || "");
+      }
+
+      btn.classList.add("copied");
+      btn.title = t("copied");
+      clearTimeout(btn._t);
+      btn._t = setTimeout(() => {
+        btn.classList.remove("copied");
+        btn.title = t("copy");
+      }, 1600);
+    } catch { /* clipboard unavailable */ }
+  });
+  node.appendChild(btn);
+}
+
+// Assistant "thinking" bubble shown while awaiting a reply.
+function showTypingIndicator() {
+  hideTypingIndicator();
+  const emptyState = UI.messagesContainer.querySelector(".empty-state");
+  if (emptyState) emptyState.remove();
+
+  const node = document.createElement("div");
+  node.className = "message assistant typing-indicator enter";
+  node.id = "typingIndicator";
+  node.innerHTML =
+    '<svg class="typing-dots" viewBox="0 0 44 12" aria-hidden="true">' +
+    '<circle cx="6" cy="6" r="4"/><circle cx="22" cy="6" r="4"/><circle cx="38" cy="6" r="4"/>' +
+    "</svg>";
+  UI.messagesContainer.appendChild(node);
+  UI.messagesContainer.scrollTop = UI.messagesContainer.scrollHeight;
+}
+
+function hideTypingIndicator() {
+  const node = document.getElementById("typingIndicator");
+  if (node) node.remove();
+}
+
+function addSystemMessage(content) {
+  const emptyState = UI.messagesContainer.querySelector(".empty-state");
+  if (emptyState) {
+    emptyState.remove();
+  }
+
+  const node = document.createElement("div");
+  node.className = "message system";
+  node.textContent = content;
+  UI.messagesContainer.appendChild(node);
+  UI.messagesContainer.scrollTop = UI.messagesContainer.scrollHeight;
+}
+
+function renderMessages() {
+  UI.messagesContainer.innerHTML = "";
+
+  if (!state.messages.length) {
+    if (state.pageContent) {
+      // Content loaded but no conversation yet — restore system message + quick questions
+      const sysKey = state.pageContent.url === "clipboard://" ? "system-clipboard-loaded" : "system-page-loaded";
+      addSystemMessage(t(sysKey));
+      showQuickQuestions();
+    } else {
+      renderEmptyState();
+    }
+    return;
+  }
+
+  state.messages.forEach((message) => {
+    addMessage(message.role, message.content, false, message);
+  });
+
+  if (state.pageContent) {
+    showQuickQuestions();
+  }
+}
+
+function shortModelName(id) {
+  return String(id || "").split("/").pop();
+}
+
+// There is no model picker: use the model the server reports (the first one if several).
+// The connected model's name is shown in the status bar.
+function renderModelOptions() {
+  if (state.models.length && !state.models.includes(state.selectedModel)) {
+    state.selectedModel = state.models[0];
+  }
+}
+
+function renderThinkToggle() {
+  UI.thinkToggle.setAttribute("aria-checked", String(state.thinking));
+  UI.thinkToggle.title = t("think-tip");
+}
+
+async function saveState() {
+  commitActiveTab();
+  await chrome.storage.local.set({
+    [STORAGE_KEYS.serverUrl]: state.serverUrl,
+    [STORAGE_KEYS.thinking]: state.thinking,
+    [STORAGE_KEYS.language]: state.currentLanguage,
+    [STORAGE_KEYS.savedPrompts]: state.savedPrompts,
+    [STORAGE_KEYS.panelMode]: state.panelMode,
+    [STORAGE_KEYS.chatComposerRatio]: state.chatComposerRatio,
+    kc_tabs: tabs,
+    kc_active_tab_id: state.activeTabId,
+    kc_next_tab_id: state.nextTabId,
+  });
+}
+
+async function initializeState() {
+  const stored = await chrome.storage.local.get([
+    STORAGE_KEYS.serverUrl,
+    STORAGE_KEYS.selectedModel,
+    STORAGE_KEYS.thinking,
+    STORAGE_KEYS.language,
+    STORAGE_KEYS.messages,
+    STORAGE_KEYS.pageContent,
+    STORAGE_KEYS.savedPrompts,
+    STORAGE_KEYS.panelMode,
+    STORAGE_KEYS.chatComposerRatio,
+    "kc_tabs",
+    "kc_active_tab_id",
+    "kc_next_tab_id",
+  ]);
+
+  state.serverUrl = normalizeServerUrl(stored[STORAGE_KEYS.serverUrl]);
+  state.thinking = stored[STORAGE_KEYS.thinking] === true;
+  state.models = [];
+  state.currentLanguage = stored[STORAGE_KEYS.language] || "zh-TW";
+  state.savedPrompts = Array.isArray(stored[STORAGE_KEYS.savedPrompts]) ? stored[STORAGE_KEYS.savedPrompts] : [];
+  state.panelMode = stored[STORAGE_KEYS.panelMode] || "sidepanel";
+  state.chatComposerRatio = normalizeComposerRatio(stored[STORAGE_KEYS.chatComposerRatio]);
+  // URL param is ground truth: no srcWindowId means we're in the sidepanel, not a popup.
+  if (POPUP_SRC_WINDOW_ID === null) {
+    state.panelMode = "sidepanel";
+  } else {
+    state.panelMode = "popup";
+  }
+
+  // Load tabs
+  if (Array.isArray(stored.kc_tabs) && stored.kc_tabs.length > 0) {
+    tabs = stored.kc_tabs;
+    state.activeTabId = stored.kc_active_tab_id ?? tabs[0].id;
+    state.nextTabId   = stored.kc_next_tab_id   ?? tabs.length;
+    if (!tabs.find(t => t.id === state.activeTabId)) state.activeTabId = tabs[0].id;
+  } else {
+    tabs = [{
+      id: 0,
+      messages:      [],
+      pageContent:   null,
+      selectedModel: stored[STORAGE_KEYS.selectedModel] || DEFAULT_MODEL,
+      sessionSaved:  false,
+    }];
+    state.activeTabId = 0;
+    state.nextTabId   = 1;
+  }
+
+  // Load active tab into state
+  const activeTab = tabs.find(t => t.id === state.activeTabId) || tabs[0];
+  state.messages      = activeTab.messages;
+  state.pageContent   = activeTab.pageContent;
+  state.selectedModel = activeTab.selectedModel || DEFAULT_MODEL;
+  state.sessionSaved  = activeTab.sessionSaved  || false;
+
+  // Apply popup-mode CSS class
+  if (state.panelMode === "popup") {
+    document.body.classList.add("popup-mode");
+  } else {
+    document.body.classList.remove("popup-mode");
+  }
+  updatePanelModeBtn();
+
+  renderModelOptions();
+  renderThinkToggle();
+  renderTabBar();
+  renderMessages();
+
+  if (state.pageContent) {
+    showPageInfo(
+      state.pageContent.title,
+      state.pageContent.url,
+      state.pageContent.isYouTubeTranscript ? state.pageContent.text : null
+    );
+  }
+
+  updateUILanguage();
+  await saveState();
+}
+
+function updatePanelModeBtn() {
+  if (!UI.panelModeBtn) return;
+  if (state.panelMode === "popup") {
+    UI.panelModeBtn.innerHTML = PANEL_ICONS.sidepanel;
+    UI.panelModeBtn.title = t("panel-mode-to-sidepanel");
+  } else {
+    UI.panelModeBtn.innerHTML = PANEL_ICONS.popup;
+    UI.panelModeBtn.title = t("panel-mode-to-popup");
+  }
+}
+
+async function togglePanelMode() {
+  const newMode = state.panelMode === "popup" ? "sidepanel" : "popup";
+  state.panelMode = newMode;
+
+  if (newMode === "popup") {
+    document.body.classList.add("popup-mode");
+  } else {
+    document.body.classList.remove("popup-mode");
+    // Call sidePanel.open() immediately — before any await — to preserve the
+    // user gesture context (Chrome requires it to be synchronous in the handler).
+    if (POPUP_SRC_WINDOW_ID) {
+      chrome.sidePanel.open({ windowId: POPUP_SRC_WINDOW_ID }).catch(() => {});
+    }
+  }
+
+  updatePanelModeBtn();
+  await saveState();
+
+  const response = await sendRuntimeMessage({ type: "SET_PANEL_MODE", mode: newMode, srcWindowId: POPUP_SRC_WINDOW_ID });
+  if (response?.ok) {
+    window.close();
+  } else {
+    setStatus("error", response?.error || "Mode switch failed");
+  }
+}
+
+// ── Tab management ──────────────────────────────────────────────────────────
+function commitActiveTab() {
+  const tab = tabs.find(t => t.id === state.activeTabId);
+  if (!tab) return;
+  tab.messages      = state.messages;
+  tab.pageContent   = state.pageContent;
+  tab.selectedModel = state.selectedModel;
+  tab.sessionSaved  = state.sessionSaved;
+}
+
+function getTabLabel(tab) {
+  if (tab.customLabel) {
+    const c = tab.customLabel.trim();
+    return c.length > 14 ? c.slice(0, 14) + "\u2026" : c;
+  }
+  if (tab.pageContent?.url === "clipboard://") {
+    return t("clipboard-tab-label");
+  }
+  if (tab.pageContent?.title) {
+    const title = tab.pageContent.title.trim();
+    return title.length > 14 ? title.slice(0, 14) + "\u2026" : title;
+  }
+  // No page loaded — use the first user message as the label
+  const firstUser = tab.messages?.find(m => m.role === "user");
+  if (firstUser?.content) {
+    const text = firstUser.content.trim().replace(/\s+/g, " ");
+    return text.length > 14 ? text.slice(0, 14) + "\u2026" : text;
+  }
+  return t("empty-tab-label");
+}
+
+function createScrollableTabBar(bar, onAdd) {
+  bar.replaceChildren();
+
+  const previous = document.createElement("button");
+  previous.className = "tab-scroll-btn tab-scroll-prev";
+  previous.type = "button";
+  previous.textContent = "\u2039";
+  previous.title = t("tab-scroll-left");
+  previous.setAttribute("aria-label", t("tab-scroll-left"));
+
+  const viewport = document.createElement("div");
+  viewport.className = "tab-scroll-viewport";
+  viewport.tabIndex = 0;
+
+  const strip = document.createElement("div");
+  strip.className = "tab-strip";
+  strip.setAttribute("role", "tablist");
+  viewport.appendChild(strip);
+
+  const next = document.createElement("button");
+  next.className = "tab-scroll-btn tab-scroll-next";
+  next.type = "button";
+  next.textContent = "\u203a";
+  next.title = t("tab-scroll-right");
+  next.setAttribute("aria-label", t("tab-scroll-right"));
+
+  const add = document.createElement("button");
+  add.className = "tab-add";
+  add.type = "button";
+  add.textContent = "+";
+  add.title = t("new-tab");
+  add.setAttribute("aria-label", t("new-tab"));
+  add.addEventListener("click", onAdd);
+
+  const updateControls = () => {
+    const maxScroll = Math.max(0, viewport.scrollWidth - viewport.clientWidth);
+    const hasOverflow = maxScroll > 1;
+    previous.classList.toggle("no-overflow", !hasOverflow);
+    next.classList.toggle("no-overflow", !hasOverflow);
+    previous.disabled = !hasOverflow || viewport.scrollLeft <= 1;
+    next.disabled = !hasOverflow || viewport.scrollLeft >= maxScroll - 1;
+  };
+
+  const scrollByPage = (direction) => {
+    const distance = Math.max(120, Math.round(viewport.clientWidth * 0.72));
+    viewport.scrollBy({ left: direction * distance, behavior: "smooth" });
+  };
+
+  previous.addEventListener("click", () => scrollByPage(-1));
+  next.addEventListener("click", () => scrollByPage(1));
+  viewport.addEventListener("scroll", updateControls, { passive: true });
+  viewport.addEventListener("wheel", (event) => {
+    if (Math.abs(event.deltaY) <= Math.abs(event.deltaX) || viewport.scrollWidth <= viewport.clientWidth) return;
+    event.preventDefault();
+    viewport.scrollLeft += event.deltaY;
+  }, { passive: false });
+  viewport.addEventListener("keydown", (event) => {
+    if (event.target !== viewport || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    if (event.key === "Home") viewport.scrollTo({ left: 0, behavior: "smooth" });
+    else if (event.key === "End") viewport.scrollTo({ left: viewport.scrollWidth, behavior: "smooth" });
+    else scrollByPage(event.key === "ArrowLeft" ? -1 : 1);
+  });
+
+  if (typeof ResizeObserver === "function") {
+    const resizeObserver = new ResizeObserver(() => {
+      if (!viewport.isConnected) {
+        resizeObserver.disconnect();
+        return;
+      }
+      updateControls();
+    });
+    resizeObserver.observe(viewport);
+  }
+
+  bar.append(previous, viewport, next, add);
+
+  const finish = () => {
+    updateControls();
+    requestAnimationFrame(() => {
+      const active = strip.querySelector(".tab-item.active");
+      if (active) {
+        const left = active.offsetLeft;
+        const right = left + active.offsetWidth;
+        let targetScroll = viewport.scrollLeft;
+        if (left < viewport.scrollLeft) targetScroll = left;
+        else if (right > viewport.scrollLeft + viewport.clientWidth) {
+          targetScroll = right - viewport.clientWidth;
+        }
+        if (targetScroll !== viewport.scrollLeft) {
+          const previousBehavior = viewport.style.scrollBehavior;
+          viewport.style.scrollBehavior = "auto";
+          viewport.scrollLeft = targetScroll;
+          requestAnimationFrame(() => { viewport.style.scrollBehavior = previousBehavior; });
+        }
+      }
+      updateControls();
+    });
+  };
+
+  return { strip, finish };
+}
+
+function renderTabBar() {
+  const bar = document.getElementById("tabBar");
+  if (!bar) return;
+  const tabBar = createScrollableTabBar(bar, addTab);
+  const strip = tabBar.strip;
+
+  let dragSrcId = null;
+
+  tabs.forEach(tab => {
+    const btn = document.createElement("button");
+    btn.className = "tab-item" + (tab.id === state.activeTabId ? " active" : "");
+    btn.draggable = true;
+    btn.dataset.tabId = tab.id;
+
+    const label = document.createElement("span");
+    label.className = "tab-label";
+    label.textContent = getTabLabel(tab);
+    label.title = t("tab-rename-hint");
+    label.addEventListener("dblclick", e => {
+      e.stopPropagation();
+      startTabRename(tab, label, btn);
+    });
+    btn.appendChild(label);
+
+    if (tabs.length > 1) {
+      const close = document.createElement("span");
+      close.className = "tab-close";
+      close.textContent = "\xd7";
+      close.addEventListener("click", e => { e.stopPropagation(); closeTab(tab.id); });
+      btn.appendChild(close);
+    }
+
+    btn.addEventListener("click", () => switchTab(tab.id));
+
+    // ── Drag-and-drop reorder ──
+    btn.addEventListener("dragstart", e => {
+      dragSrcId = tab.id;
+      e.dataTransfer.effectAllowed = "move";
+      btn.classList.add("dragging");
+    });
+    btn.addEventListener("dragend", () => {
+      btn.classList.remove("dragging");
+      strip.querySelectorAll(".tab-item").forEach(b => b.classList.remove("drag-over"));
+    });
+    btn.addEventListener("dragover", e => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      if (dragSrcId !== tab.id) btn.classList.add("drag-over");
+    });
+    btn.addEventListener("dragleave", () => btn.classList.remove("drag-over"));
+    btn.addEventListener("drop", e => {
+      e.preventDefault();
+      btn.classList.remove("drag-over");
+      if (dragSrcId === null || dragSrcId === tab.id) return;
+      commitActiveTab();
+      const srcIdx  = tabs.findIndex(t => t.id === dragSrcId);
+      const destIdx = tabs.findIndex(t => t.id === tab.id);
+      if (srcIdx === -1 || destIdx === -1) return;
+      const [moved] = tabs.splice(srcIdx, 1);
+      tabs.splice(destIdx, 0, moved);
+      renderTabBar();
+      saveState();
+    });
+
+    strip.appendChild(btn);
+  });
+  tabBar.finish();
+}
+
+// Inline-rename a tab: swap the label for a text input, commit on Enter/blur,
+// cancel on Escape. An empty value clears the custom label (auto label returns).
+function startTabRename(tab, label, btn) {
+  const input = document.createElement("input");
+  input.className = "tab-rename-input";
+  input.value = tab.customLabel || getTabLabel(tab);
+  input.maxLength = 40;
+  const wasDraggable = btn.draggable;
+  btn.draggable = false;
+
+  label.replaceWith(input);
+  input.focus();
+  input.select();
+
+  let done = false;
+  const finish = commit => {
+    if (done) return;
+    done = true;
+    btn.draggable = wasDraggable;
+    if (commit) {
+      const v = input.value.trim();
+      tab.customLabel = v || null;
+      saveState();
+    }
+    renderTabBar();
+  };
+  input.addEventListener("keydown", e => {
+    e.stopPropagation();
+    if (e.key === "Enter") { e.preventDefault(); finish(true); }
+    else if (e.key === "Escape") { e.preventDefault(); finish(false); }
+  });
+  input.addEventListener("blur", () => finish(true));
+  input.addEventListener("click", e => e.stopPropagation());
+  input.addEventListener("dblclick", e => e.stopPropagation());
+}
+
+async function addTab() {
+  commitActiveTab();
+  const id = state.nextTabId;
+  state.nextTabId++;
+  tabs.push({ id, messages: [], pageContent: null, selectedModel: state.selectedModel, sessionSaved: false });
+  state.activeTabId  = id;
+  state.messages     = [];
+  state.pageContent  = null;
+  state.sessionSaved = false;
+  renderTabBar();
+  hidePageInfo();
+  renderMessages();
+  await saveState();
+}
+
+async function switchTab(id) {
+  if (id === state.activeTabId) return;
+  commitActiveTab();
+  state.activeTabId = id;
+  const tab = tabs.find(t => t.id === id) || tabs[0];
+  state.messages      = tab.messages;
+  state.pageContent   = tab.pageContent;
+  state.selectedModel = tab.selectedModel;
+  state.sessionSaved  = tab.sessionSaved;
+  renderTabBar();
+  renderMessages();
+  if (state.pageContent) showPageInfo(
+    state.pageContent.title,
+    state.pageContent.url,
+    state.pageContent.isYouTubeTranscript ? state.pageContent.text : null
+  );
+  else hidePageInfo();
+  await saveState();
+}
+
+async function closeTab(id) {
+  const idx = tabs.findIndex(t => t.id === id);
+  if (idx === -1) return;
+
+  // Determine whether this tab has unsaved content.
+  // For the active tab use state.* (may have uncommitted changes);
+  // for non-active tabs read directly from tabs[].
+  const isActive = id === state.activeTabId;
+  const tabData  = isActive ? state : tabs[idx];
+  const hasUnsaved = tabData.messages.length > 0 && !tabData.sessionSaved;
+
+  if (hasUnsaved) {
+    // Switch to the tab so the user can see what they're being asked to save,
+    // and so that downloadSession() operates on the correct content.
+    if (!isActive) await switchTab(id);
+    const choice = await showConfirmSaveDialog();
+    if (choice === "cancel") return;
+    if (choice === "yes") await downloadSession();
+  }
+  tabs.splice(idx, 1);
+  if (tabs.length === 0) {
+    tabs.push({ id: state.nextTabId, messages: [], pageContent: null, selectedModel: DEFAULT_MODEL, sessionSaved: false });
+    state.nextTabId++;
+  }
+  if (id === state.activeTabId) {
+    const next = tabs[Math.min(idx, tabs.length - 1)];
+    state.activeTabId   = next.id;
+    state.messages      = next.messages;
+    state.pageContent   = next.pageContent;
+    state.selectedModel = next.selectedModel;
+    state.sessionSaved  = next.sessionSaved;
+  }
+  renderTabBar();
+  renderMessages();
+  if (state.pageContent) showPageInfo(
+    state.pageContent.title,
+    state.pageContent.url,
+    state.pageContent.isYouTubeTranscript ? state.pageContent.text : null
+  );
+  else hidePageInfo();
+  await saveState();
+}
+
+const QUICK_QUESTIONS = [
+  { key: "concise",   icon: `<path d="M8 6h13M8 12h13M8 18h13"/><path d="M3.5 6h.01M3.5 12h.01M3.5 18h.01"/>` },
+  { key: "keydata",   icon: `<path d="M3 21h18"/><rect x="5" y="11" width="3.4" height="7" rx="1"/><rect x="10.3" y="6" width="3.4" height="12" rx="1"/><rect x="15.6" y="14" width="3.4" height="4" rx="1"/>` },
+  { key: "rootcause", icon: `<circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/>` },
+  { key: "risk",      icon: `<path d="M12 3 2 20h20L12 3Z"/><path d="M12 10v4"/><path d="M12 17h.01"/>` },
+  { key: "action",    icon: `<path d="M9 11l3 3L20 5"/><path d="M20 12v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/>` },
+  { key: "quiz",      icon: `<rect x="6" y="4" width="12" height="16" rx="2"/><path d="M9 4V3h6v1"/><path d="M9 12.5l2 2 4-4.5"/>` },
+];
+
+function showQuickQuestions() {
+  const existingQuick = UI.messagesContainer.querySelector(".quick-questions");
+  if (existingQuick) {
+    existingQuick.remove();
+  }
+
+  const existingSaved = UI.messagesContainer.querySelector(".saved-prompts-section");
+  if (existingSaved) {
+    existingSaved.remove();
+  }
+
+  const quickNode = document.createElement("div");
+  quickNode.className = "quick-questions";
+
+  const btnsHtml = QUICK_QUESTIONS.map((q) => `
+      <button class="quick-question-btn" data-template="${q.key}">
+        <svg class="qq-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${q.icon}</svg>
+        <span class="qq-label">${t("template-" + q.key)}</span>
+      </button>`).join("");
+
+  const helpHtml = QUICK_QUESTIONS.map((q) => `
+      <div class="qq-help-item"><span class="qq-help-name">${t("template-" + q.key)}</span><span class="qq-help-desc">${t("qq-desc-" + q.key)}</span></div>`).join("");
+
+  quickNode.innerHTML = `
+    <div class="quick-questions-title">
+      <span>${t("quick-question-title")}</span>
+      <button class="qq-help-btn" id="quickHelpBtn" title="${t("quick-question-help")}" aria-label="${t("quick-question-help")}">?</button>
+    </div>
+    <div class="qq-help-panel" id="qqHelpPanel" hidden>
+      <div class="qq-help-intro">${t("qq-help-intro")}</div>
+      ${helpHtml}
+    </div>
+    <div class="quick-questions-grid">${btnsHtml}</div>
+  `;
+
+  const firstMessage = UI.messagesContainer.querySelector(".message");
+  if (firstMessage) {
+    UI.messagesContainer.insertBefore(quickNode, firstMessage);
+  } else {
+    UI.messagesContainer.appendChild(quickNode);
+  }
+
+  const helpBtn = quickNode.querySelector("#quickHelpBtn");
+  const helpPanel = quickNode.querySelector("#qqHelpPanel");
+  helpBtn?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (!helpPanel) return;
+    helpPanel.hidden = !helpPanel.hidden;
+    helpBtn.classList.toggle("on", !helpPanel.hidden);
+  });
+
+  quickNode.querySelectorAll(".quick-question-btn").forEach((btn) => {
+    const template = btn.getAttribute("data-template") || "";
+    btn.title = getQuestionPrompt(template);
+    btn.addEventListener("click", () => {
+      handleQuickQuestion(template);
+    });
+  });
+
+  showSavedPromptsSection();
+}
+
+function showSavedPromptsSection() {
+  const existingSaved = UI.messagesContainer.querySelector(".saved-prompts-section");
+  if (existingSaved) {
+    existingSaved.remove();
+  }
+
+  const savedNode = document.createElement("div");
+  savedNode.className = "saved-prompts-section";
+
+  const listHtml = !state.savedPrompts.length
+    ? `<div class="empty-saved-prompts">
+         <svg class="sp-empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3h12a1 1 0 0 1 1 1v17l-7-4-7 4V4a1 1 0 0 1 1-1Z"/></svg>
+         <span>${t("empty-saved-prompts")}</span>
+       </div>`
+    : state.savedPrompts
+      .map((prompt, index) => `<button class="saved-prompt-btn" data-index="${index}">
+          <svg class="sp-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5Z"/></svg>
+          <span class="sp-label">${escapeHtml(prompt)}</span>
+        </button>`)
+      .join("");
+
+  savedNode.innerHTML = `
+    <div class="saved-prompts-header">
+      <div class="saved-prompts-title">
+        <svg class="sp-title-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3h12a1 1 0 0 1 1 1v17l-7-4-7 4V4a1 1 0 0 1 1-1Z"/></svg>
+        <span>${t("saved-prompts")}</span>
+      </div>
+      <button class="manage-prompts-btn" id="managePromptsBtn">
+        <svg class="mp-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="21" y1="6" x2="14" y2="6"/><line x1="10" y1="6" x2="3" y2="6"/><line x1="21" y1="12" x2="12" y2="12"/><line x1="8" y1="12" x2="3" y2="12"/><line x1="21" y1="18" x2="16" y2="18"/><line x1="12" y1="18" x2="3" y2="18"/><line x1="14" y1="4" x2="14" y2="8"/><line x1="8" y1="10" x2="8" y2="14"/><line x1="16" y1="16" x2="16" y2="20"/></svg>
+        <span>${t("manage-prompts")}</span>
+      </button>
+    </div>
+    <div class="saved-prompts-list">
+      ${listHtml}
+    </div>
+  `;
+
+  const quickNode = UI.messagesContainer.querySelector(".quick-questions");
+  if (quickNode && quickNode.nextSibling) {
+    UI.messagesContainer.insertBefore(savedNode, quickNode.nextSibling);
+  } else if (quickNode) {
+    quickNode.parentNode.insertBefore(savedNode, quickNode.nextSibling);
+  } else {
+    UI.messagesContainer.appendChild(savedNode);
+  }
+
+  const manageBtn = savedNode.querySelector("#managePromptsBtn");
+  if (manageBtn) {
+    manageBtn.addEventListener("click", openSavedPromptsModal);
+  }
+
+  savedNode.querySelectorAll(".saved-prompt-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const index = Number(btn.getAttribute("data-index"));
+      usePrompt(index);
+    });
+  });
+}
+
+function getQuestionPrompt(template) {
+  const prompts = {
+    "zh-TW": {
+      concise: "請用簡短的條列式摘要載入的內容，使用繁體中文，重點放在關鍵概念上。",
+      keydata: "請從載入的內容中，整理出關鍵的技術規格、參數、數據與設定，並以表格或條列方式呈現。若涉及版本、平台、元件、量測數值或組態，請一併列出。使用繁體中文，技術術語（例如 GPU, PCIe, BIOS, driver）保留英文。",
+      rootcause: "請針對這份 sighting／文件所描述的問題進行根因分析（root cause analysis）。請說明：(1) 問題現象與觸發條件，(2) 最可能的根本原因與推論依據，(3) 其他仍需排除的可能性。使用繁體中文，技術術語保留英文。若現有資訊不足以判斷，請明確指出還需要哪些資料或 log。",
+      risk: "請根據載入的內容，說明其影響範圍與潛在風險：(1) 受影響的元件／功能／平台，(2) 對使用者、產品或時程的影響程度，(3) 尚未解決或需特別注意的風險。使用繁體中文，技術術語保留英文。",
+      action: "請根據載入的內容，整理出後續行動項目（action items）。每一項請包含具體要做的事與目的；若文中有提到負責人、時程或 workaround（暫解方案），請一併標註。使用繁體中文。",
+      quiz: "請根據載入的內容，出幾道測驗題來考我。題目要能區分死記硬背與真正理解的差異，例如要求應用概念、分析情境或比較異同，而不是單純背誦。請一題一題來，等我回答後再出下一題，並針對我的答案給予回饋。使用繁體中文。"
+    },
+    "zh-CN": {
+      concise: "请用简短的条列式摘要载入的内容，使用简体中文，重点放在关键概念上。",
+      keydata: "请从载入的内容中，整理出关键的技术规格、参数、数据与设定，并以表格或条列方式呈现。若涉及版本、平台、元件、量测数值或配置，请一并列出。使用简体中文，技术术语（例如 GPU, PCIe, BIOS, driver）保留英文。",
+      rootcause: "请针对这份 sighting／文件所描述的问题进行根因分析（root cause analysis）。请说明：(1) 问题现象与触发条件，(2) 最可能的根本原因与推论依据，(3) 其他仍需排除的可能性。使用简体中文，技术术语保留英文。若现有信息不足以判断，请明确指出还需要哪些资料或 log。",
+      risk: "请根据载入的内容，说明其影响范围与潜在风险：(1) 受影响的元件／功能／平台，(2) 对使用者、产品或时程的影响程度，(3) 尚未解决或需特别注意的风险。使用简体中文，技术术语保留英文。",
+      action: "请根据载入的内容，整理出后续行动项目（action items）。每一项请包含具体要做的事与目的；若文中有提到负责人、时程或 workaround（暂解方案），请一并标注。使用简体中文。",
+      quiz: "请根据载入的内容，出几道测验题来考我。题目要能区分死记硬背与真正理解的差异，例如要求应用概念、分析情境或比较异同，而非单纯背诵。请一题一题来，等我回答后再出下一题，并针对我的答案给予回馈。使用简体中文。"
+    },
+    en: {
+      concise: "Please summarize the loaded content using short bullet points in English, focusing on key concepts.",
+      keydata: "From the loaded content, extract the key technical specs, parameters, data and settings, presented as a table or bullet list. Include versions, platforms, components, measured values or configurations where relevant. Respond in English.",
+      rootcause: "Perform a root-cause analysis of the issue described in this sighting/document. Explain: (1) the symptom and trigger conditions, (2) the most likely root cause and your reasoning, (3) other possibilities that still need to be ruled out. If the available information is insufficient, clearly state what additional data or logs are needed. Respond in English.",
+      risk: "Based on the loaded content, describe the impact scope and potential risks: (1) affected components/features/platforms, (2) severity of impact on users, product or schedule, (3) unresolved risks or points needing attention. Respond in English.",
+      action: "Based on the loaded content, compile the follow-up action items. For each item include the concrete task and its purpose; note the owner, timeline or any workaround if mentioned. Respond in English.",
+      quiz: "Quiz me on the loaded content. Use questions that distinguish rote memorization from real understanding (applying concepts, analyzing scenarios, comparing). Ask one at a time, wait for my answer, then give feedback before the next. Respond in English."
+    }
+  };
+
+  return prompts[state.currentLanguage]?.[template] || "";
+}
+
+// Rough token estimate: CJK characters ≈ 1.2 tokens, everything else ≈ 1 token per 3.5 chars
+function estimateTokens(text) {
+  let cjk = 0;
+  for (const ch of text) {
+    const c = ch.codePointAt(0);
+    if ((c >= 0x3000 && c <= 0x9fff) || (c >= 0xac00 && c <= 0xd7af) || (c >= 0xff00 && c <= 0xffef)) cjk++;
+  }
+  return cjk * 1.2 + (text.length - cjk) / 3.5;
+}
+
+function limitContextText(text) {
+  const full = String(text || "");
+  if (estimateTokens(full) <= CONTEXT_TOKEN_BUDGET) return { text: full, truncated: false };
+  let lo = 0;
+  let hi = full.length;
+  while (hi - lo > 200) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (estimateTokens(full.slice(0, mid)) <= CONTEXT_TOKEN_BUDGET) lo = mid;
+    else hi = mid;
+  }
+  return { text: full.slice(0, lo), truncated: true, kept: lo, total: full.length };
+}
+
+function buildApiMessages(userMessage) {
+  // Only role/content go to the server (stored messages also carry reasoning/stopped flags)
+  const history = state.messages.map(({ role, content }) => ({ role, content }));
+  const apiMessages = [];
+
+  if (state.pageContent) {
+    if (state.messages.length === 0) {
+      const contextMessage = `Page Title: ${state.pageContent.title}\nPage URL: ${state.pageContent.url}\n\nPage Content:\n${state.pageContent.text}\n\n---\n\nUser Question: ${userMessage}`;
+      apiMessages.push({ role: "user", content: contextMessage });
+    } else {
+      const contextMessage = `Page Title: ${state.pageContent.title}\nPage URL: ${state.pageContent.url}\n\nPage Content:\n${state.pageContent.text}`;
+      apiMessages.push({ role: "user", content: contextMessage });
+      apiMessages.push({ role: "assistant", content: "I have the page content. How can I help you?" });
+      apiMessages.push(...history);
+      apiMessages.push({ role: "user", content: userMessage });
+    }
+    return apiMessages;
+  }
+
+  apiMessages.push(...history);
+  apiMessages.push({ role: "user", content: userMessage });
+  return apiMessages;
+}
+
+// POST /v3/chat/completions with stream:true (OpenAI-compatible SSE). The server sends the
+// model's thinking in delta.reasoning_content and the answer in delta.content.
+async function streamChat(apiMessages, { signal, onReasoning, onContent }) {
+  const body = {
+    model: state.selectedModel,
+    messages: [
+      { role: "system", content: SYSTEM_PROMPTS[state.currentLanguage] || SYSTEM_PROMPTS["zh-TW"] },
+      ...apiMessages
+    ],
+    stream: true,
+    max_tokens: MAX_OUTPUT_TOKENS,
+    temperature: state.thinking ? 0.6 : 0.7,
+    chat_template_kwargs: { enable_thinking: state.thinking }
+  };
+
+  const res = await fetch(`${apiBase()}/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status}${detail ? ": " + detail.slice(0, 300) : ""}`);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+
+    let idx;
+    while ((idx = buffer.indexOf("\n\n")) >= 0) {
+      const event = buffer.slice(0, idx);
+      buffer = buffer.slice(idx + 2);
+      for (const line of event.split("\n")) {
+        if (!line.startsWith("data:")) continue;
+        const data = line.slice(5).trim();
+        if (!data || data === "[DONE]") continue;
+        let chunk;
+        try { chunk = JSON.parse(data); } catch { continue; }
+        if (chunk.error) throw new Error(chunk.error.message || JSON.stringify(chunk.error));
+        const delta = chunk.choices?.[0]?.delta;
+        if (delta?.reasoning_content) onReasoning(delta.reasoning_content);
+        if (delta?.content) onContent(delta.content);
+      }
+    }
+  }
+}
+
+function renderSendButton() {
+  const streaming = state.abortController !== null;
+  UI.sendBtn.classList.toggle("stop", streaming);
+  UI.sendLabel.textContent = t(streaming ? "stop" : "send");
+  UI.sendLabel.setAttribute("data-i18n", streaming ? "stop" : "send");
+}
+
+function isNearBottom(el) {
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+}
+
+// Send one question and stream the answer into the chat.
+// displayText is what the user sees / what is stored; apiMessages is what the model gets.
+async function runChat(displayText, apiMessages) {
+  const srcTabId = state.activeTabId;
+  const controller = new AbortController();
+  state.abortController = controller;
+  // The input stays enabled while the answer streams so the next question can be typed
+  // ahead; sending is blocked until the answer finishes (or is stopped).
+  renderSendButton();
+  setStatus("loading", t("status-streaming"));
+
+  const userNode = addMessage("user", displayText, true);
+  UI.messageInput.value = "";
+  UI.messageInput.style.height = "auto";
+  showTypingIndicator();
+
+  let answer = "";
+  let reasoning = "";
+  let thinkStartedAt = 0;
+  let thinkSec = 0;
+  let live = null;  // { node, details, summary, body, answerEl }
+  let paintQueued = false;
+
+  const ensureLive = () => {
+    if (live) return live;
+    hideTypingIndicator();
+    const node = document.createElement("div");
+    node.className = "message assistant streaming enter";
+    const details = document.createElement("details");
+    details.className = "reasoning live";
+    details.hidden = true;
+    const summary = document.createElement("summary");
+    const body = document.createElement("div");
+    body.className = "reasoning-body";
+    details.append(summary, body);
+    const answerEl = document.createElement("div");
+    answerEl.className = "answer";
+    node.append(details, answerEl);
+    if (state.activeTabId === srcTabId) UI.messagesContainer.appendChild(node);
+    live = { node, details, summary, body, answerEl };
+    return live;
+  };
+
+  const paint = () => {
+    paintQueued = false;
+    if (!live) return;
+    const stick = isNearBottom(UI.messagesContainer);
+    if (reasoning) {
+      live.details.hidden = false;
+      live.body.textContent = reasoning;
+      live.body.scrollTop = live.body.scrollHeight;
+      if (!answer) live.summary.textContent = t("thinking-live");
+    }
+    live.answerEl.innerHTML = renderMarkdown(cleanAnswer(answer));
+    if (stick && state.activeTabId === srcTabId) UI.messagesContainer.scrollTop = UI.messagesContainer.scrollHeight;
+  };
+  const schedulePaint = () => {
+    if (!paintQueued) {
+      paintQueued = true;
+      requestAnimationFrame(paint);
+    }
+  };
+
+  let failure = null;
+  let aborted = false;
+  try {
+    await streamChat(apiMessages, {
+      signal: controller.signal,
+      onReasoning: (piece) => {
+        ensureLive();
+        if (!thinkStartedAt) thinkStartedAt = Date.now();
+        reasoning += piece;
+        schedulePaint();
+      },
+      onContent: (piece) => {
+        ensureLive();
+        if (thinkStartedAt && !answer) {
+          thinkSec = Math.max(1, Math.round((Date.now() - thinkStartedAt) / 1000));
+          live.details.open = false;  // fold the thinking away once the answer starts
+        }
+        answer += piece;
+        schedulePaint();
+      }
+    });
+  } catch (err) {
+    if (err?.name === "AbortError") aborted = true;
+    else failure = err;
+  }
+
+  hideTypingIndicator();
+  const hasAnswer = cleanAnswer(answer).length > 0;
+
+  if (failure || (aborted && !hasAnswer)) {
+    // No answer came back (error, or stopped while still thinking): undo the turn and
+    // give the question back to the user
+    live?.node.remove();
+    userNode.remove();
+    if (!state.messages.length && !state.pageContent) renderEmptyState();
+    // Hand the question back, unless the user has already started typing something new
+    if (!UI.messageInput.value.trim()) {
+      UI.messageInput.value = displayText;
+      UI.messageInput.style.height = "auto";
+      UI.messageInput.style.height = `${UI.messageInput.scrollHeight}px`;
+    }
+    setStatus(failure ? "error" : "ready", failure ? t("error-send") + (failure.message || String(failure)) : t("status-stopped"));
+  } else {
+    const finalAnswer = cleanAnswer(answer) || (aborted ? "" : t("no-answer-hint"));
+    if (thinkStartedAt && !thinkSec) thinkSec = Math.max(1, Math.round((Date.now() - thinkStartedAt) / 1000));
+    const extra = { reasoning: reasoning || undefined, thinkSec: reasoning ? thinkSec : undefined, stopped: aborted || undefined };
+
+    if (live && state.activeTabId === srcTabId) {
+      live.node.remove();  // replace the live node with a finished one (copy button, folded thoughts)
+      addMessage("assistant", finalAnswer, false, extra);
+    }
+    const message = { role: "assistant", content: finalAnswer, ...extra };
+    const userMessage = { role: "user", content: displayText };
+    if (state.activeTabId === srcTabId) {
+      state.messages.push(userMessage, message);
+      state.sessionSaved = false;
+      commitActiveTab();
+      if (state.pageContent) showQuickQuestions();
+    } else {
+      const srcTab = tabs.find((tab) => tab.id === srcTabId);
+      if (srcTab) {
+        srcTab.messages.push(userMessage, message);
+        srcTab.sessionSaved = false;
+      }
+    }
+    await saveState();
+    renderTabBar();
+    setStatus("ready", aborted ? t("status-stopped") : t("status-ready"));
+  }
+
+  state.abortController = null;
+  renderSendButton();
+  // Focus the box again after Stop / a finished answer, but never pull focus away from
+  // something else the user is working in.
+  if (document.activeElement === document.body || document.activeElement === UI.sendBtn) {
+    UI.messageInput.focus();
+  }
+}
+
+async function sendMessage() {
+  if (state.abortController) return;
+  if (!state.serverUrl) {
+    await promptForServer(true);
+    if (!state.serverUrl) return;
+    await loadModels();
+  }
+  if (!state.selectedModel) {
+    const ok = await loadModels();
+    if (!ok) return;
+  }
+
+  const userMessage = UI.messageInput.value.trim();
+  if (!userMessage) {
+    setStatus("error", t("error-empty-message"));
+    return;
+  }
+
+  await runChat(userMessage, buildApiMessages(userMessage));
+}
+
+async function handleQuickQuestion(template) {
+  if (state.abortController) return;
+  const prompt = getQuestionPrompt(template);
+  if (!prompt) return;
+  UI.messageInput.value = prompt;
+  UI.messageInput.style.height = "auto";
+  UI.messageInput.style.height = `${UI.messageInput.scrollHeight}px`;
+  await sendMessage();
+}
+
+async function loadPageContent() {
+  UI.loadPageBtn.disabled = true;
+  setStatus("loading", t("status-loading-page"));
+
+  try {
+    // In sidepanel mode, currentWindow gives the active tab in the host browser window.
+    // In popup mode the "current window" is the extension popup, so we query all windows
+    // and filter out chrome-extension:// tabs.
+    let tab;
+    if (POPUP_SRC_WINDOW_ID === null) {
+      // Sidepanel mode
+      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+      tab = tabs[0];
+    } else {
+      // Popup mode — prefer the source browser window (the one user clicked from)
+      const srcTabs = await chrome.tabs.query({ active: true, windowId: POPUP_SRC_WINDOW_ID });
+      tab = srcTabs.find(t => !t.url?.startsWith("chrome-extension://")) || srcTabs[0];
+      if (!tab) {
+        // Fallback: any active non-extension tab
+        const allTabs = await chrome.tabs.query({ active: true });
+        tab = allTabs.find(t => !t.url?.startsWith("chrome-extension://"))
+           || allTabs.find(t => t.windowType !== "popup")
+           || allTabs[0];
+      }
+    }
+    console.log("[KC] loadPageContent target tab:", { id: tab?.id, url: tab?.url, windowId: tab?.windowId, mode: POPUP_SRC_WINDOW_ID === null ? "sidepanel" : "popup" });
+    if (!tab?.id) {
+      setStatus("error", t("error-no-tab"));
+      return;
+    }
+
+    const response = await sendRuntimeMessage({ type: "GET_PAGE_CONTENT", tabId: tab.id });
+    if (!response?.ok) {
+      state.pageContent = null;
+      setStatus("error", t("error-load-page") + (response?.error || "Unknown error"));
+      return;
+    }
+
+    state.messages = [];
+    renderEmptyState();
+
+    const limited = limitContextText(response.content.text);
+    state.pageContent = { ...response.content, text: limited.text };
+    showPageInfo(
+      state.pageContent.title,
+      state.pageContent.url,
+      state.pageContent.isYouTubeTranscript ? state.pageContent.text : null
+    );
+    const sysMsg = state.pageContent.isYouTubeTranscript
+      ? t("system-youtube-transcript-loaded")
+      : t("system-page-loaded");
+    addSystemMessage(sysMsg);
+    if (limited.truncated) {
+      addSystemMessage(t("system-content-truncated", { kept: String(limited.kept), total: String(limited.total) }));
+    }
+    showQuickQuestions();
+    commitActiveTab();
+    renderTabBar();
+
+    await saveState();
+    let statusMsg;
+    if (state.pageContent.isYouTubeTranscript) {
+      statusMsg = t("status-youtube-transcript-loaded");
+    } else if (state.pageContent.isYouTubeNoTranscript) {
+      statusMsg = t("status-youtube-no-transcript");
+    } else {
+      statusMsg = t("status-page-loaded");
+    }
+    setStatus("ready", statusMsg);
+  } catch (err) {
+    state.pageContent = null;
+    setStatus("error", t("error-load-page") + (err.message || String(err)));
+  } finally {
+    UI.loadPageBtn.disabled = false;
+  }
+}
+
+async function loadClipboardContent() {
+  UI.loadClipboardBtn.disabled = true;
+  setStatus("loading", t("status-loading-clipboard"));
+
+  try {
+    const clipboardText = await navigator.clipboard.readText();
+    if (!clipboardText || !clipboardText.trim()) {
+      setStatus("error", t("error-clipboard-empty"));
+      return;
+    }
+
+    state.messages = [];
+    renderEmptyState();
+
+    const limited = limitContextText(clipboardText.trim());
+    state.pageContent = {
+      title: "Clipboard Content",
+      url: "clipboard://",
+      text: limited.text
+    };
+
+    showPageInfo(`📋 ${t("load-clipboard")}`, `${clipboardText.length} chars`);
+    addSystemMessage(t("system-clipboard-loaded"));
+    if (limited.truncated) {
+      addSystemMessage(t("system-content-truncated", { kept: String(limited.kept), total: String(limited.total) }));
+    }
+    showQuickQuestions();
+    commitActiveTab();
+    renderTabBar();
+
+    await saveState();
+    setStatus("ready", t("status-clipboard-loaded"));
+  } catch (err) {
+    state.pageContent = null;
+    setStatus("error", t("error-load-clipboard") + (err.message || String(err)));
+  } finally {
+    UI.loadClipboardBtn.disabled = false;
+  }
+}
+
+async function clearConversation() {
+  if (tabs.length > 1) {
+    await closeTab(state.activeTabId);
+    return;
+  }
+  // Only one tab: clear its content
+  if (state.messages.length > 0 && !state.sessionSaved) {
+    const choice = await showConfirmSaveDialog();
+    if (choice === "cancel") return;
+    if (choice === "yes") await downloadSession();
+  }
+  state.messages = [];
+  state.pageContent = null;
+  state.sessionSaved = false;
+  hidePageInfo();
+  renderMessages();
+  commitActiveTab();
+  renderTabBar();
+  await saveState();
+  setStatus("ready", t("status-ready"));
+}
+
+async function loadModels() {
+  if (!state.serverUrl) {
+    state.models = [];
+    renderModelOptions();
+    setStatus("error", t("server-required"));
+    return false;
+  }
+
+  setStatus("loading", t("status-loading-models"));
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), MODELS_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${apiBase()}/models`, { signal: controller.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    state.models = (data.data || []).map((m) => String(m?.id || "").trim()).filter(Boolean);
+    if (!state.models.length) throw new Error(t("error-no-models"));
+  } catch (err) {
+    state.models = [];
+    renderModelOptions();
+    const reason = err?.name === "AbortError" ? "timeout" : (err.message || String(err));
+    setStatus("error", t("error-load-models") + reason);
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+
+  renderModelOptions();
+  await saveState();
+  setStatus("ready", t("status-connected", { model: shortModelName(state.selectedModel) }));
+  return true;
+}
+
+function openSavedPromptsModal() {
+  UI.savedPromptsModal.classList.add("show");
+  renderSavedPromptsList();
+}
+
+function closeSavedPromptsModal() {
+  UI.savedPromptsModal.classList.remove("show");
+  UI.newPromptInput.value = "";
+}
+
+function renderSavedPromptsList() {
+  if (!state.savedPrompts.length) {
+    UI.savedPromptsList.innerHTML = `
+      <div class="empty-prompts">
+        <div class="empty-prompts-icon">📝</div>
+        <div class="empty-prompts-text">${t("empty-prompts")}</div>
+      </div>
+    `;
+    return;
+  }
+
+  UI.savedPromptsList.innerHTML = state.savedPrompts
+    .map(
+      (prompt, index) => `
+      <div class="saved-prompt-item" data-index="${index}">
+        <div class="drag-handle" title="拖曳排序">⠿</div>
+        <div class="saved-prompt-text" data-index="${index}">${escapeHtml(prompt)}</div>
+        <div class="saved-prompt-actions">
+          <button class="prompt-action-btn delete-prompt-btn" data-index="${index}" title="Delete">🗑️</button>
+        </div>
+      </div>
+    `
+    )
+    .join("");
+
+  let draggingIndex = null;
+
+  UI.savedPromptsList.querySelectorAll(".saved-prompt-item").forEach((item) => {
+    const idx = Number(item.dataset.index);
+    const handle = item.querySelector(".drag-handle");
+
+    // Enable dragging only when pointerdown on the handle
+    handle.addEventListener("pointerdown", () => {
+      item.setAttribute("draggable", "true");
+    });
+
+    item.addEventListener("dragstart", (e) => {
+      draggingIndex = idx;
+      item.classList.add("dragging");
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", String(idx));
+    });
+
+    item.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      UI.savedPromptsList.querySelectorAll(".drag-over").forEach(el => el.classList.remove("drag-over"));
+      if (idx !== draggingIndex) item.classList.add("drag-over");
+    });
+
+    item.addEventListener("dragleave", () => { item.classList.remove("drag-over"); });
+
+    item.addEventListener("drop", async (e) => {
+      e.preventDefault();
+      item.classList.remove("drag-over");
+      if (draggingIndex === null || draggingIndex === idx) return;
+      const [dragged] = state.savedPrompts.splice(draggingIndex, 1);
+      state.savedPrompts.splice(idx, 0, dragged);
+      await saveState();
+      renderSavedPromptsList();
+      if (state.pageContent) showSavedPromptsSection();
+    });
+
+    item.addEventListener("dragend", () => {
+      item.removeAttribute("draggable");
+      item.classList.remove("dragging");
+      UI.savedPromptsList.querySelectorAll(".drag-over").forEach(el => el.classList.remove("drag-over"));
+      draggingIndex = null;
+    });
+  });
+
+  UI.savedPromptsList.querySelectorAll(".saved-prompt-text").forEach((element) => {
+    element.addEventListener("click", () => {
+      const index = Number(element.getAttribute("data-index"));
+      usePrompt(index);
+    });
+  });
+
+  UI.savedPromptsList.querySelectorAll(".delete-prompt-btn").forEach((button) => {
+    button.addEventListener("click", () => {
+      const index = Number(button.getAttribute("data-index"));
+      deletePrompt(index);
+    });
+  });
+}
+
+async function addNewPrompt() {
+  const promptText = UI.newPromptInput.value.trim();
+  if (!promptText) return;
+
+  state.savedPrompts.push(promptText);
+  await saveState();
+
+  UI.newPromptInput.value = "";
+  renderSavedPromptsList();
+
+  if (state.pageContent) {
+    showSavedPromptsSection();
+  }
+}
+
+async function deletePrompt(index) {
+  state.savedPrompts.splice(index, 1);
+  await saveState();
+  renderSavedPromptsList();
+
+  if (state.pageContent) {
+    showSavedPromptsSection();
+  }
+}
+
+function usePrompt(index) {
+  const prompt = state.savedPrompts[index];
+  if (!prompt) return;
+
+  UI.messageInput.value = prompt;
+  UI.messageInput.style.height = "auto";
+  UI.messageInput.style.height = `${UI.messageInput.scrollHeight}px`;
+  UI.messageInput.focus();
+  closeSavedPromptsModal();
+}
+
+function buildSessionMarkdown() {
+  const lines = [];
+  const dateStr = new Date().toLocaleString();
+  lines.push("# Chatter Remote Session\n");
+  lines.push(`**Date**: ${dateStr}  `);
+  lines.push(`**Model**: ${state.selectedModel}  `);
+  if (state.pageContent) {
+    lines.push(`**Page**: [${state.pageContent.title}](${state.pageContent.url})  `);
+  }
+  lines.push("\n---\n");
+  for (const msg of state.messages) {
+    const role = msg.role === "user" ? "## \u{1F464} User" : "## \u{1F916} Assistant";
+    lines.push(role + "\n");
+    lines.push(msg.content + "\n");
+    lines.push("---\n");
+  }
+  return lines.join("\n");
+}
+
+async function downloadSession() {
+  if (state.messages.length === 0) {
+    setStatus("error", t("status-session-empty"));
+    return;
+  }
+  const md = buildSessionMarkdown();
+  const blob = new Blob([md], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const ts = new Date().toISOString().slice(0, 19).replace("T", "_").replace(/:/g, "");
+  const filename = `chatter-remote-report/${ts}.md`;
+  try {
+    const downloadId = await chrome.downloads.download({ url, filename, saveAs: true });
+
+    // Wait for the download to either complete or be cancelled by the user
+    const savedOk = await new Promise((resolve) => {
+      const onChanged = (delta) => {
+        if (delta.id !== downloadId) return;
+        if (delta.state?.current === "complete") {
+          chrome.downloads.onChanged.removeListener(onChanged);
+          resolve(true);
+        } else if (delta.state?.current === "interrupted") {
+          chrome.downloads.onChanged.removeListener(onChanged);
+          resolve(false);
+        }
+      };
+      chrome.downloads.onChanged.addListener(onChanged);
+      // Also check immediately in case the state already settled before we registered
+      chrome.downloads.search({ id: downloadId }).then(([item]) => {
+        if (item?.state === "complete") {
+          chrome.downloads.onChanged.removeListener(onChanged);
+          resolve(true);
+        } else if (item?.state === "interrupted") {
+          chrome.downloads.onChanged.removeListener(onChanged);
+          resolve(false);
+        }
+      });
+    });
+
+    if (savedOk) {
+      state.sessionSaved = true;
+      setStatus("ready", t("status-session-saved"));
+    } else {
+      setStatus("ready", t("status-ready"));
+    }
+  } catch (err) {
+    setStatus("error", err.message || "Download failed");
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+function setupEventHandlers() {
+  UI.languageSelect.addEventListener("change", async () => {
+    state.currentLanguage = UI.languageSelect.value;
+    updateUILanguage();
+
+    if (state.pageContent) {
+      showQuickQuestions();
+    }
+
+    await saveState();
+    setStatus("ready", t("lang-set", { lang: state.currentLanguage }));
+  });
+
+  const openServerSettings = async () => {
+    const updated = await promptForServer(false);
+    if (updated) {
+      await loadModels();
+    }
+  };
+  UI.headerTitle.addEventListener("click", openServerSettings);
+  UI.serverBtn.addEventListener("click", openServerSettings);
+
+  UI.thinkToggle.addEventListener("click", async () => {
+    state.thinking = !state.thinking;
+    renderThinkToggle();
+    await saveState();
+    setStatus("ready", t(state.thinking ? "think-on" : "think-off"));
+  });
+
+  UI.statusText.addEventListener("click", () => {
+    if (!state.abortController) loadModels();
+  });
+  UI.updateDismissBtn.addEventListener("click", dismissExtensionUpdate);
+  UI.panelModeBtn.addEventListener("click", togglePanelMode);
+  UI.saveSessionBtn.addEventListener("click", downloadSession);
+  UI.loadPageBtn.addEventListener("click", loadPageContent);
+  UI.loadClipboardBtn.addEventListener("click", loadClipboardContent);
+  UI.clearBtn.addEventListener("click", clearConversation);
+
+  UI.sendBtn.addEventListener("click", () => {
+    if (state.abortController) state.abortController.abort();
+    else sendMessage();
+  });
+
+  // Header cursor spotlight: a soft light that smoothly trails the pointer.
+  (() => {
+    const bar = document.querySelector(".header-bar");
+    if (!bar) return;
+
+    // Double-click an empty area of the header (not a button/select/title)
+    // to toggle the ambient white sheen on or off.
+    bar.addEventListener("dblclick", (e) => {
+      if (e.target.closest(".header-title, .header-controls")) return;
+      bar.classList.toggle("sheen-off");
+    });
+
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    let curX = 0, curY = 0, tgtX = 0, tgtY = 0, raf = 0, lit = false;
+    const tick = () => {
+      curX += (tgtX - curX) * 0.18;
+      curY += (tgtY - curY) * 0.18;
+      bar.style.setProperty("--mx", curX + "px");
+      bar.style.setProperty("--my", curY + "px");
+      if (lit && (Math.abs(tgtX - curX) > 0.5 || Math.abs(tgtY - curY) > 0.5)) {
+        raf = requestAnimationFrame(tick);
+      } else {
+        raf = 0;
+      }
+    };
+    bar.addEventListener("pointermove", (e) => {
+      const r = bar.getBoundingClientRect();
+      tgtX = e.clientX - r.left;
+      tgtY = e.clientY - r.top;
+      if (!raf) raf = requestAnimationFrame(tick);
+    });
+    bar.addEventListener("pointerenter", (e) => {
+      const r = bar.getBoundingClientRect();
+      curX = tgtX = e.clientX - r.left;
+      curY = tgtY = e.clientY - r.top;
+      lit = true;
+      bar.classList.add("lit");
+      if (!raf) raf = requestAnimationFrame(tick);
+    });
+    bar.addEventListener("pointerleave", () => {
+      lit = false;
+      bar.classList.remove("lit");
+    });
+  })();
+
+  // Header icon buttons: replay a small SVG state-change animation on each click.
+  [UI.clearBtn, UI.saveSessionBtn, UI.loadPageBtn, UI.loadClipboardBtn, UI.panelModeBtn].forEach((btn) => {
+    if (!btn) return;
+    btn.addEventListener("click", () => {
+      btn.classList.remove("tog");
+      void btn.offsetWidth;
+      btn.classList.add("tog");
+    });
+    btn.addEventListener("animationend", () => btn.classList.remove("tog"));
+  });
+
+  // Send button press feedback: replay the squash + plane launch on each press.
+  function playSendPress() {
+    if (UI.sendBtn.disabled) return;
+    UI.sendBtn.classList.remove("go");
+    void UI.sendBtn.offsetWidth;
+    UI.sendBtn.classList.add("go");
+  }
+  UI.sendBtn.addEventListener("pointerdown", playSendPress);
+  UI.sendBtn.addEventListener("animationend", (e) => {
+    // Keep .go until the longest animation (plane-launch) finishes so it
+    // always plays out fully, even if the button was released early.
+    if (e.animationName === "plane-launch") UI.sendBtn.classList.remove("go");
+  });
+
+  UI.messageInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      if (state.abortController) return;  // still answering: keep the typed text, send later
+      playSendPress();
+      sendMessage();
+    }
+  });
+
+  UI.closeSavedPromptsModal.addEventListener("click", closeSavedPromptsModal);
+  UI.savedPromptsModal.addEventListener("click", (event) => {
+    if (event.target === UI.savedPromptsModal) {
+      closeSavedPromptsModal();
+    }
+  });
+
+  UI.addPromptBtn.addEventListener("click", addNewPrompt);
+  UI.newPromptInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && event.ctrlKey) {
+      event.preventDefault();
+      addNewPrompt();
+    }
+  });
+}
+
+async function bootstrap() {
+  renderInstalledVersion();
+  await initializeState();
+  setupEventHandlers();
+  setupLayoutResizers();
+  checkForExtensionUpdate().catch(() => {});
+
+  if (!state.serverUrl) {
+    setStatus("error", t("server-required"));
+    if (await promptForServer(true)) await loadModels();
+    return;
+  }
+
+  setStatus("ready", t("status-ready"));
+  await loadModels();
+}
+
+bootstrap().catch((err) => {
+  setStatus("error", t("error-init") + (err.message || String(err)));
+});

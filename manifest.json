@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "Chatter Remote",
+  "version": "1.0.0",
+  "description": "Chat with a Qwen3 LLM running on your own OVMS server from a side panel: load a webpage or clipboard as context, quick questions, saved prompts, and a multilingual UI.",
+  "permissions": [
+    "activeTab",
+    "tabs",
+    "scripting",
+    "storage",
+    "unlimitedStorage",
+    "sidePanel",
+    "clipboardRead",
+    "windows",
+    "downloads"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "action": {
+    "default_title": "Chatter Remote - Chat with Webpage"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  }
+}
