@@ -1,0 +1,27 @@
+# Optional gateway for models that the extension cannot reach directly.
+#
+# Example: a vLLM service that only exists inside a Kubernetes cluster (ClusterIP address,
+# private-CA HTTPS). Chrome on your PC cannot reach that address, so this container runs on
+# the server, talks to it, and re-exposes /v1 as plain HTTP on the server's own address.
+#
+#   docker compose up -d
+#   curl --noproxy '*' http://<SERVER_IP>:17496/v1/models
+#
+# Then set the extension's server address to  http://<SERVER_IP>:17496/v1
+#
+# Host networking is used so the container sees the same ClusterIP routes as the host does.
+services:
+  chatter-gateway:
+    image: nginx:1.28-alpine
+    container_name: chatter-gateway
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      # Where the model server lives, as seen from the server (no trailing slash, no /v1)
+      UPSTREAM: ${UPSTREAM:-https://10.43.177.105:9443}
+      # Port the gateway listens on. Use 127.0.0.1-only access with a firewall rule or an
+      # SSH tunnel if the model should not be reachable by everyone on the network.
+      LISTEN_PORT: ${LISTEN_PORT:-17496}
+      NGINX_ENVSUBST_FILTER: UPSTREAM|LISTEN_PORT
+    volumes:
+      - ./nginx.conf.template:/etc/nginx/templates/default.conf.template:ro

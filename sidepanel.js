@@ -2,6 +2,7 @@
 
 const STORAGE_KEYS = {
   serverUrl: "serverUrl",
+  apiPrefix: "apiPrefix",
   selectedModel: "selectedModel",
   thinking: "thinkingEnabled",
   language: "language",
@@ -114,8 +115,8 @@ const TRANSLATIONS = {
     "tab-scroll-right": "向右捲動分頁",
     "server-settings": "伺服器設定",
     "server-modal-title": "設定伺服器位址",
-    "server-modal-hint": "請輸入 OVMS 伺服器（ovms-qwen3-27b）的位址，例如 http://<伺服器 IP>:8003。位址只存在這個瀏覽器裡。",
-    "server-placeholder": "http://<伺服器 IP>:8003",
+    "server-modal-hint": "請輸入模型伺服器的位址（OpenAI 相容服務，例如 OVMS、vLLM），像 http://<伺服器 IP>:17496/v1 或 http://<伺服器 IP>:8003。沒寫 /v1 或 /v3 時會自動偵測。位址只存在這個瀏覽器裡。",
+    "server-placeholder": "http://<伺服器 IP>:17496/v1",
     "server-confirm": "連線",
     "server-cancel": "取消",
     "server-required": "請先設定伺服器位址（點右上角的 ⚙）",
@@ -217,8 +218,8 @@ const TRANSLATIONS = {
     "copied": "已复制",
     "server-settings": "服务器设置",
     "server-modal-title": "设置服务器地址",
-    "server-modal-hint": "请输入 OVMS 服务器（ovms-qwen3-27b）的地址，例如 http://<服务器 IP>:8003。地址只保存在这个浏览器里。",
-    "server-placeholder": "http://<服务器 IP>:8003",
+    "server-modal-hint": "请输入模型服务器的地址（OpenAI 兼容服务，例如 OVMS、vLLM），如 http://<服务器 IP>:17496/v1 或 http://<服务器 IP>:8003。没写 /v1 或 /v3 时会自动检测。地址只保存在这个浏览器里。",
+    "server-placeholder": "http://<服务器 IP>:17496/v1",
     "server-confirm": "连接",
     "server-cancel": "取消",
     "server-required": "请先设置服务器地址（点右上角的 ⚙）",
@@ -320,8 +321,8 @@ const TRANSLATIONS = {
     "copied": "Copied",
     "server-settings": "Server settings",
     "server-modal-title": "Set server address",
-    "server-modal-hint": "Enter the address of the OVMS server (ovms-qwen3-27b), e.g. http://<server-ip>:8003. It is stored only in this browser.",
-    "server-placeholder": "http://<server-ip>:8003",
+    "server-modal-hint": "Enter the address of the model server (an OpenAI-compatible service such as OVMS or vLLM), e.g. http://<server-ip>:17496/v1 or http://<server-ip>:8003. Without /v1 or /v3 the version is detected automatically. It is stored only in this browser.",
+    "server-placeholder": "http://<server-ip>:17496/v1",
     "server-confirm": "Connect",
     "server-cancel": "Cancel",
     "server-required": "Set the server address first (⚙ at the top right)",
@@ -399,6 +400,7 @@ let tabs = [
 let state = {
   currentLanguage: "zh-TW",
   serverUrl: "",
+  apiPrefix: "",  // "/v1" or "/v3"; empty until detected
   thinking: false,
   selectedModel: DEFAULT_MODEL,
   models: [],
@@ -746,20 +748,33 @@ function setupLayoutResizers() {
 }
 
 // ── Server connection ───────────────────────────────────────────────────────
-function normalizeServerUrl(value) {
+// The address may carry the API prefix (".../v1" for vLLM / SGLang / OpenAI-style servers,
+// ".../v3" for OpenVINO Model Server). Without a prefix the panel tries /v1, then /v3.
+const API_PREFIXES = ["/v1", "/v3"];
+
+function splitServerAddress(value) {
   let v = String(value || "").trim().replace(/\/+$/, "");
-  v = v.replace(/\/v3(\/.*)?$/i, "");  // accept a pasted API URL such as http://host:8003/v3
+  let prefix = "";
+  const m = v.match(/^(.*?)(\/v[13])(\/.*)?$/i);
+  if (m) {
+    v = m[1];
+    prefix = m[2].toLowerCase();
+  }
   if (v && !/^https?:\/\//i.test(v)) v = "http://" + v;
-  return v;
+  return { url: v, prefix };
+}
+
+function normalizeServerUrl(value) {
+  return splitServerAddress(value).url;
 }
 
 function apiBase() {
-  return `${state.serverUrl}/v3`;
+  return `${state.serverUrl}${state.apiPrefix || API_PREFIXES[0]}`;
 }
 
 function promptForServer(force = false) {
   return new Promise((resolve) => {
-    UI.serverInput.value = state.serverUrl || "";
+    UI.serverInput.value = state.serverUrl ? state.serverUrl + (state.apiPrefix || "") : "";
     UI.serverModal.classList.add("show");
     UI.serverInput.focus();
     UI.serverInput.select();
@@ -774,13 +789,14 @@ function promptForServer(force = false) {
     }
 
     async function onConfirm() {
-      const url = normalizeServerUrl(UI.serverInput.value);
+      const { url, prefix } = splitServerAddress(UI.serverInput.value);
       if (!url) {
         UI.serverInput.focus();
         return;
       }
       cleanup();
       state.serverUrl = url;
+      state.apiPrefix = prefix;  // "" = detect on connect
       await saveState();
       setStatus("ready", t("server-updated"));
       resolve(true);
@@ -1135,6 +1151,7 @@ async function saveState() {
   commitActiveTab();
   await chrome.storage.local.set({
     [STORAGE_KEYS.serverUrl]: state.serverUrl,
+    [STORAGE_KEYS.apiPrefix]: state.apiPrefix,
     [STORAGE_KEYS.thinking]: state.thinking,
     [STORAGE_KEYS.language]: state.currentLanguage,
     [STORAGE_KEYS.savedPrompts]: state.savedPrompts,
@@ -1149,6 +1166,7 @@ async function saveState() {
 async function initializeState() {
   const stored = await chrome.storage.local.get([
     STORAGE_KEYS.serverUrl,
+    STORAGE_KEYS.apiPrefix,
     STORAGE_KEYS.selectedModel,
     STORAGE_KEYS.thinking,
     STORAGE_KEYS.language,
@@ -1163,6 +1181,7 @@ async function initializeState() {
   ]);
 
   state.serverUrl = normalizeServerUrl(stored[STORAGE_KEYS.serverUrl]);
+  state.apiPrefix = API_PREFIXES.includes(stored[STORAGE_KEYS.apiPrefix]) ? stored[STORAGE_KEYS.apiPrefix] : "";
   state.thinking = stored[STORAGE_KEYS.thinking] === true;
   state.models = [];
   state.currentLanguage = stored[STORAGE_KEYS.language] || "zh-TW";
@@ -1789,7 +1808,7 @@ function buildApiMessages(userMessage) {
 }
 
 // POST /v3/chat/completions with stream:true (OpenAI-compatible SSE). The server sends the
-// model's thinking in delta.reasoning_content and the answer in delta.content.
+// model's thinking in delta.reasoning_content (or delta.reasoning) and the answer in delta.content.
 async function streamChat(apiMessages, { signal, onReasoning, onContent }) {
   const body = {
     model: state.selectedModel,
@@ -1834,7 +1853,9 @@ async function streamChat(apiMessages, { signal, onReasoning, onContent }) {
         try { chunk = JSON.parse(data); } catch { continue; }
         if (chunk.error) throw new Error(chunk.error.message || JSON.stringify(chunk.error));
         const delta = chunk.choices?.[0]?.delta;
-        if (delta?.reasoning_content) onReasoning(delta.reasoning_content);
+        // OVMS and older vLLM call the thinking text reasoning_content; newer vLLM calls it reasoning
+        const thought = delta?.reasoning_content ?? delta?.reasoning;
+        if (thought) onReasoning(thought);
         if (delta?.content) onContent(delta.content);
       }
     }
@@ -2173,23 +2194,35 @@ async function loadModels() {
   }
 
   setStatus("loading", t("status-loading-models"));
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), MODELS_TIMEOUT_MS);
-  try {
-    const res = await fetch(`${apiBase()}/models`, { signal: controller.signal });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    state.models = (data.data || []).map((m) => String(m?.id || "").trim()).filter(Boolean);
-    if (!state.models.length) throw new Error(t("error-no-models"));
-  } catch (err) {
+  // A prefix given in the address (or detected earlier) is used as is; otherwise try each one
+  const prefixes = state.apiPrefix ? [state.apiPrefix] : API_PREFIXES;
+  let models = null;
+  let lastError = null;
+  for (const prefix of prefixes) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), MODELS_TIMEOUT_MS);
+    try {
+      const res = await fetch(`${state.serverUrl}${prefix}/models`, { signal: controller.signal });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const ids = (data.data || []).map((m) => String(m?.id || "").trim()).filter(Boolean);
+      if (!ids.length) throw new Error(t("error-no-models"));
+      models = ids;
+      state.apiPrefix = prefix;  // remember which API version answered
+      break;
+    } catch (err) {
+      lastError = err?.name === "AbortError" ? new Error("timeout") : err;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  if (!models) {
     state.models = [];
     renderModelOptions();
-    const reason = err?.name === "AbortError" ? "timeout" : (err.message || String(err));
-    setStatus("error", t("error-load-models") + reason);
+    setStatus("error", t("error-load-models") + (lastError?.message || String(lastError)));
     return false;
-  } finally {
-    clearTimeout(timer);
   }
+  state.models = models;
 
   renderModelOptions();
   await saveState();

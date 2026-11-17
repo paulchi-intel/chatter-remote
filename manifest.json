@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Chatter Remote",
-  "version": "1.0.0",
-  "description": "Chat with a Qwen3 LLM running on your own OVMS server from a side panel: load a webpage or clipboard as context, quick questions, saved prompts, and a multilingual UI.",
+  "version": "1.0.1",
+  "description": "Chat with an LLM running on your own OpenAI-compatible server (vLLM, OVMS) from a side panel: load a webpage or clipboard as context, quick questions, saved prompts, and a multilingual UI.",
   "permissions": [
     "activeTab",
     "tabs",
